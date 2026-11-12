@@ -1,10 +1,11 @@
-import { pool } from '../config/db.js';
+import crypto from 'crypto';
+import { turso } from '../config/db.js';
 import { generateReferenceNumber } from '../utils/referenceGenerator.js';
 import { AUDIT_ACTIONS } from '../constants/auditActions.js';
 
 export const incidentService = {
   /**
-   * Atomically registers an incident with one or more offences and an audit log.
+   * Atomically registers an incident with one or more offences and an audit log in Turso.
    */
   async registerIncident(incidentData, agentId, ipAddress = null) {
     const {
@@ -32,15 +33,18 @@ export const incidentService = {
       throw error;
     }
 
-    const client = await pool.connect();
     const referenceNumber = generateReferenceNumber();
+    const incidentId = crypto.randomUUID();
+    const dateValue = incident_date || new Date().toISOString();
+
+    // Begin interactive write transaction in Turso
+    const tx = await turso.transaction('write');
 
     try {
-      await client.query('BEGIN');
-
-      // 1. Insert Incident Record
+      // 1. Insert Incident
       const insertIncidentQuery = `
         INSERT INTO incidents (
+          id,
           reference_number,
           agent_id,
           incident_date,
@@ -59,90 +63,99 @@ export const incidentService = {
           driver_name,
           remarks,
           status
-        ) VALUES (
-          $1, $2, COALESCE($3::timestamptz, NOW()), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, 'recorded'
-        )
-        RETURNING *
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'recorded')
       `;
 
-      const incidentResult = await client.query(insertIncidentQuery, [
-        referenceNumber,
-        agentId,
-        incident_date || null,
-        location_id || null,
-        manual_location || null,
-        location_description || null,
-        plate_number.trim().toUpperCase(),
-        body_number ? body_number.trim() : null,
-        vehicle_make.trim(),
-        vehicle_model.trim(),
-        vehicle_color.trim(),
-        vehicle_type.trim(),
-        vehicle_owner_name ? vehicle_owner_name.trim() : null,
-        vehicle_owner_phone ? vehicle_owner_phone.trim() : null,
-        driver_license_number ? driver_license_number.trim() : null,
-        driver_name ? driver_name.trim() : null,
-        remarks || null,
-      ]);
+      await tx.execute({
+        sql: insertIncidentQuery,
+        args: [
+          incidentId,
+          referenceNumber,
+          agentId,
+          dateValue,
+          location_id || null,
+          manual_location || null,
+          location_description || null,
+          plate_number.trim().toUpperCase(),
+          body_number ? body_number.trim() : null,
+          vehicle_make.trim(),
+          vehicle_model.trim(),
+          vehicle_color.trim(),
+          vehicle_type.trim(),
+          vehicle_owner_name ? vehicle_owner_name.trim() : null,
+          vehicle_owner_phone ? vehicle_owner_phone.trim() : null,
+          driver_license_number ? driver_license_number.trim() : null,
+          driver_name ? driver_name.trim() : null,
+          remarks || null,
+        ],
+      });
 
-      const createdIncident = incidentResult.rows[0];
-
-      // 2. Insert Associated Offences
+      // 2. Insert Offences
       const insertedOffences = [];
       for (const item of offences) {
-        // If fine_amount not provided in payload, look up default penalty from offence_types
         let fine = item.fine_amount;
         if (fine === undefined || fine === null) {
-          const defaultPenaltyRes = await client.query(
-            `SELECT penalty_amount FROM offence_types WHERE id = $1`,
-            [item.offence_type_id]
-          );
-          fine = defaultPenaltyRes.rows[0]?.penalty_amount || 0.00;
+          const defaultPenaltyRes = await tx.execute({
+            sql: 'SELECT penalty_amount FROM offence_types WHERE id = ?',
+            args: [item.offence_type_id],
+          });
+          fine = defaultPenaltyRes.rows[0]?.penalty_amount ?? 0.0;
         }
 
-        const insertOffenceQuery = `
-          INSERT INTO incident_offences (incident_id, offence_type_id, fine_amount, notes)
-          VALUES ($1, $2, $3, $4)
-          RETURNING *
-        `;
-        const offenceRes = await client.query(insertOffenceQuery, [
-          createdIncident.id,
-          item.offence_type_id,
-          fine,
-          item.notes || null,
-        ]);
-        insertedOffences.push(offenceRes.rows[0]);
+        const offenceId = crypto.randomUUID();
+        await tx.execute({
+          sql: `INSERT INTO incident_offences (id, incident_id, offence_type_id, fine_amount, notes)
+                VALUES (?, ?, ?, ?, ?)`,
+          args: [offenceId, incidentId, item.offence_type_id, fine, item.notes || null],
+        });
+
+        insertedOffences.push({
+          id: offenceId,
+          incident_id: incidentId,
+          offence_type_id: item.offence_type_id,
+          fine_amount: fine,
+          notes: item.notes || null,
+        });
       }
 
       // 3. Write Immutable Audit Log
-      const auditQuery = `
-        INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-        VALUES ($1, $2, $3, $4, $5, $6)
-      `;
-      await client.query(auditQuery, [
-        agentId,
-        AUDIT_ACTIONS.INCIDENT_CREATED,
-        'incidents',
-        createdIncident.id,
-        JSON.stringify({
-          reference_number: referenceNumber,
-          plate_number: createdIncident.plate_number,
-          offences_count: insertedOffences.length,
-        }),
-        ipAddress,
-      ]);
+      const auditLogId = crypto.randomUUID();
+      await tx.execute({
+        sql: `INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details, ip_address)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          auditLogId,
+          agentId,
+          AUDIT_ACTIONS.INCIDENT_CREATED,
+          'incidents',
+          incidentId,
+          JSON.stringify({
+            reference_number: referenceNumber,
+            plate_number: plate_number.trim().toUpperCase(),
+            offences_count: insertedOffences.length,
+          }),
+          ipAddress || null,
+        ],
+      });
 
-      await client.query('COMMIT');
+      await tx.commit();
 
       return {
-        ...createdIncident,
+        id: incidentId,
+        reference_number: referenceNumber,
+        agent_id: agentId,
+        incident_date: dateValue,
+        plate_number: plate_number.trim().toUpperCase(),
+        vehicle_make,
+        vehicle_model,
+        vehicle_color,
+        vehicle_type,
+        status: 'recorded',
         offences: insertedOffences,
       };
     } catch (error) {
-      await client.query('ROLLBACK');
+      await tx.rollback();
       throw error;
-    } finally {
-      client.release();
     }
   },
 
@@ -168,67 +181,67 @@ export const incidentService = {
 
     const offset = (page - 1) * limit;
     const conditions = [];
-    const params = [];
+    const args = [];
 
     if (reference_number) {
-      params.push(`%${reference_number.trim()}%`);
-      conditions.push(`i.reference_number ILIKE $${params.length}`);
+      conditions.push('i.reference_number LIKE ?');
+      args.push(`%${reference_number.trim()}%`);
     }
 
     if (plate_number) {
-      params.push(`%${plate_number.trim().toUpperCase()}%`);
-      conditions.push(`i.plate_number ILIKE $${params.length}`);
+      conditions.push('i.plate_number LIKE ?');
+      args.push(`%${plate_number.trim().toUpperCase()}%`);
     }
 
     if (body_number) {
-      params.push(`%${body_number.trim()}%`);
-      conditions.push(`i.body_number ILIKE $${params.length}`);
+      conditions.push('i.body_number LIKE ?');
+      args.push(`%${body_number.trim()}%`);
     }
 
     if (vehicle_type) {
-      params.push(vehicle_type.trim());
-      conditions.push(`i.vehicle_type ILIKE $${params.length}`);
+      conditions.push('i.vehicle_type LIKE ?');
+      args.push(`%${vehicle_type.trim()}%`);
     }
 
     if (vehicle_make) {
-      params.push(`%${vehicle_make.trim()}%`);
-      conditions.push(`i.vehicle_make ILIKE $${params.length}`);
+      conditions.push('i.vehicle_make LIKE ?');
+      args.push(`%${vehicle_make.trim()}%`);
     }
 
     if (vehicle_model) {
-      params.push(`%${vehicle_model.trim()}%`);
-      conditions.push(`i.vehicle_model ILIKE $${params.length}`);
+      conditions.push('i.vehicle_model LIKE ?');
+      args.push(`%${vehicle_model.trim()}%`);
     }
 
     if (agent_id) {
-      params.push(agent_id);
-      conditions.push(`i.agent_id = $${params.length}`);
+      conditions.push('i.agent_id = ?');
+      args.push(agent_id);
     }
 
     if (location_id) {
-      params.push(location_id);
-      conditions.push(`i.location_id = $${params.length}`);
+      conditions.push('i.location_id = ?');
+      args.push(location_id);
     }
 
     if (start_date) {
-      params.push(start_date);
-      conditions.push(`i.incident_date >= $${params.length}::timestamptz`);
+      conditions.push('i.incident_date >= ?');
+      args.push(start_date);
     }
 
     if (end_date) {
-      params.push(end_date);
-      conditions.push(`i.incident_date <= $${params.length}::timestamptz`);
+      conditions.push('i.incident_date <= ?');
+      args.push(end_date);
     }
 
-    // Filter by offence category without duplicating incident rows
+    // Deduplication when filtering by offence category
     if (category) {
-      params.push(`%${category.trim()}%`);
       conditions.push(`EXISTS (
         SELECT 1 
         FROM incident_offences io
         JOIN offence_types ot ON io.offence_type_id = ot.id
-        WHERE io.incident_id = i.id AND ot.category ILIKE $${params.length}
+        WHERE io.incident_id = i.id AND ot.category LIKE ?
       )`);
+      args.push(`%${category.trim()}%`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -239,13 +252,10 @@ export const incidentService = {
       FROM incidents i
       ${whereClause}
     `;
-    const countRes = await pool.query(countQuery, params);
-    const total = parseInt(countRes.rows[0].total, 10);
+    const countRes = await turso.execute({ sql: countQuery, args });
+    const total = Number(countRes.rows[0].total);
 
     // Paginated Incidents with Aggregated Offences
-    params.push(limit);
-    params.push(offset);
-
     const query = `
       SELECT 
         i.*,
@@ -253,9 +263,9 @@ export const incidentService = {
         p.badge_number AS agent_badge,
         l.name AS predefined_location_name,
         l.code AS predefined_location_code,
-        COALESCE(
-          json_agg(
-            json_build_object(
+        json_group_array(
+          CASE WHEN io.id IS NOT NULL THEN
+            json_object(
               'id', io.id,
               'offence_type_id', ot.id,
               'title', ot.title,
@@ -264,8 +274,7 @@ export const incidentService = {
               'fine_amount', io.fine_amount,
               'notes', io.notes
             )
-          ) FILTER (WHERE io.id IS NOT NULL),
-          '[]'
+          ELSE NULL END
         ) AS offences,
         COALESCE(SUM(io.fine_amount), 0) AS total_fine_amount
       FROM incidents i
@@ -274,15 +283,36 @@ export const incidentService = {
       LEFT JOIN incident_offences io ON i.id = io.incident_id
       LEFT JOIN offence_types ot ON io.offence_type_id = ot.id
       ${whereClause}
-      GROUP BY i.id, p.full_name, p.badge_number, l.name, l.code
+      GROUP BY i.id
       ORDER BY i.incident_date DESC
-      LIMIT $${params.length - 1} OFFSET $${params.length}
+      LIMIT ? OFFSET ?
     `;
 
-    const result = await pool.query(query, params);
+    const result = await turso.execute({
+      sql: query,
+      args: [...args, limit, offset],
+    });
+
+    const parsedIncidents = result.rows.map((row) => {
+      let offencesList = [];
+      try {
+        if (typeof row.offences === 'string') {
+          const parsed = JSON.parse(row.offences);
+          offencesList = Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+        }
+      } catch (e) {
+        offencesList = [];
+      }
+
+      return {
+        ...row,
+        offences: offencesList,
+        total_fine_amount: Number(row.total_fine_amount),
+      };
+    });
 
     return {
-      incidents: result.rows,
+      incidents: parsedIncidents,
       pagination: {
         total,
         page: Number(page),
@@ -305,9 +335,9 @@ export const incidentService = {
         l.name AS predefined_location_name,
         l.code AS predefined_location_code,
         l.area_or_zone,
-        COALESCE(
-          json_agg(
-            json_build_object(
+        json_group_array(
+          CASE WHEN io.id IS NOT NULL THEN
+            json_object(
               'id', io.id,
               'offence_type_id', ot.id,
               'title', ot.title,
@@ -317,8 +347,7 @@ export const incidentService = {
               'demerit_points', ot.demerit_points,
               'notes', io.notes
             )
-          ) FILTER (WHERE io.id IS NOT NULL),
-          '[]'
+          ELSE NULL END
         ) AS offences,
         COALESCE(SUM(io.fine_amount), 0) AS total_fine_amount
       FROM incidents i
@@ -326,10 +355,10 @@ export const incidentService = {
       LEFT JOIN locations l ON i.location_id = l.id
       LEFT JOIN incident_offences io ON i.id = io.incident_id
       LEFT JOIN offence_types ot ON io.offence_type_id = ot.id
-      WHERE i.id = $1
-      GROUP BY i.id, p.full_name, p.badge_number, p.email, l.name, l.code, l.area_or_zone
+      WHERE i.id = ?
+      GROUP BY i.id
     `;
-    const result = await pool.query(query, [incidentId]);
+    const result = await turso.execute({ sql: query, args: [incidentId] });
 
     if (result.rows.length === 0) {
       const error = new Error('Incident record not found.');
@@ -337,7 +366,22 @@ export const incidentService = {
       throw error;
     }
 
-    return result.rows[0];
+    const row = result.rows[0];
+    let offencesList = [];
+    try {
+      if (typeof row.offences === 'string') {
+        const parsed = JSON.parse(row.offences);
+        offencesList = Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+      }
+    } catch (e) {
+      offencesList = [];
+    }
+
+    return {
+      ...row,
+      offences: offencesList,
+      total_fine_amount: Number(row.total_fine_amount),
+    };
   },
 
   /**
@@ -351,9 +395,9 @@ export const incidentService = {
         p.badge_number AS agent_badge,
         l.name AS predefined_location_name,
         l.code AS predefined_location_code,
-        COALESCE(
-          json_agg(
-            json_build_object(
+        json_group_array(
+          CASE WHEN io.id IS NOT NULL THEN
+            json_object(
               'id', io.id,
               'offence_type_id', ot.id,
               'title', ot.title,
@@ -362,8 +406,7 @@ export const incidentService = {
               'fine_amount', io.fine_amount,
               'notes', io.notes
             )
-          ) FILTER (WHERE io.id IS NOT NULL),
-          '[]'
+          ELSE NULL END
         ) AS offences,
         COALESCE(SUM(io.fine_amount), 0) AS total_fine_amount
       FROM incidents i
@@ -371,10 +414,10 @@ export const incidentService = {
       LEFT JOIN locations l ON i.location_id = l.id
       LEFT JOIN incident_offences io ON i.id = io.incident_id
       LEFT JOIN offence_types ot ON io.offence_type_id = ot.id
-      WHERE UPPER(i.reference_number) = UPPER($1)
-      GROUP BY i.id, p.full_name, p.badge_number, l.name, l.code
+      WHERE UPPER(i.reference_number) = UPPER(?)
+      GROUP BY i.id
     `;
-    const result = await pool.query(query, [referenceNumber]);
+    const result = await turso.execute({ sql: query, args: [referenceNumber] });
 
     if (result.rows.length === 0) {
       const error = new Error(`Incident with reference ${referenceNumber} not found.`);
@@ -382,6 +425,21 @@ export const incidentService = {
       throw error;
     }
 
-    return result.rows[0];
+    const row = result.rows[0];
+    let offencesList = [];
+    try {
+      if (typeof row.offences === 'string') {
+        const parsed = JSON.parse(row.offences);
+        offencesList = Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+      }
+    } catch (e) {
+      offencesList = [];
+    }
+
+    return {
+      ...row,
+      offences: offencesList,
+      total_fine_amount: Number(row.total_fine_amount),
+    };
   },
 };

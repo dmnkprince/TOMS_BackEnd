@@ -1,6 +1,7 @@
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { pool } from '../config/db.js';
+import { turso } from '../config/db.js';
 import { ENV } from '../config/env.js';
 import { AUDIT_ACTIONS } from '../constants/auditActions.js';
 import { auditLogService } from './auditLogService.js';
@@ -10,10 +11,10 @@ export const authService = {
     const query = `
       SELECT id, full_name, badge_number, email, password_hash, role, phone_number, status
       FROM profiles
-      WHERE LOWER(email) = LOWER($1)
+      WHERE LOWER(email) = LOWER(?)
       LIMIT 1
     `;
-    const result = await pool.query(query, [email]);
+    const result = await turso.execute({ sql: query, args: [email] });
 
     if (result.rows.length === 0) {
       const error = new Error('Invalid email or password.');
@@ -68,9 +69,9 @@ export const authService = {
     // Check existing email or badge number
     const checkQuery = `
       SELECT email, badge_number FROM profiles 
-      WHERE LOWER(email) = LOWER($1) OR UPPER(badge_number) = UPPER($2)
+      WHERE LOWER(email) = LOWER(?) OR UPPER(badge_number) = UPPER(?)
     `;
-    const checkResult = await pool.query(checkQuery, [email, badge_number]);
+    const checkResult = await turso.execute({ sql: checkQuery, args: [email, badge_number] });
     if (checkResult.rows.length > 0) {
       const existing = checkResult.rows[0];
       const conflictField = existing.email.toLowerCase() === email.toLowerCase() ? 'Email' : 'Badge number';
@@ -81,29 +82,33 @@ export const authService = {
 
     const salt = await bcrypt.genSalt(10);
     const password_hash = await bcrypt.hash(password, salt);
+    const id = crypto.randomUUID();
 
     const insertQuery = `
-      INSERT INTO profiles (full_name, badge_number, email, password_hash, role, phone_number, status)
-      VALUES ($1, $2, $3, $4, $5, $6, 'active')
-      RETURNING id, full_name, badge_number, email, role, phone_number, status, created_at
+      INSERT INTO profiles (id, full_name, badge_number, email, password_hash, role, phone_number, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
     `;
-    const result = await pool.query(insertQuery, [
-      full_name,
-      badge_number.toUpperCase(),
-      email.toLowerCase(),
-      password_hash,
-      role,
-      phone_number || null,
-    ]);
+    await turso.execute({
+      sql: insertQuery,
+      args: [
+        id,
+        full_name,
+        badge_number.toUpperCase(),
+        email.toLowerCase(),
+        password_hash,
+        role,
+        phone_number || null,
+      ],
+    });
 
-    const newUser = result.rows[0];
+    const newUser = await this.getProfile(id);
 
     // Audit log
     await auditLogService.createLog({
-      userId: creatorId || newUser.id,
+      userId: creatorId || id,
       action: AUDIT_ACTIONS.USER_REGISTERED,
       entityType: 'profiles',
-      entityId: newUser.id,
+      entityId: id,
       details: { role: newUser.role, badge_number: newUser.badge_number },
       ipAddress,
     });
@@ -112,11 +117,11 @@ export const authService = {
   },
 
   async getProfile(userId) {
-    const result = await pool.query(
-      `SELECT id, full_name, badge_number, email, role, phone_number, status, created_at, updated_at
-       FROM profiles WHERE id = $1`,
-      [userId]
-    );
+    const result = await turso.execute({
+      sql: `SELECT id, full_name, badge_number, email, role, phone_number, status, created_at, updated_at
+            FROM profiles WHERE id = ? LIMIT 1`,
+      args: [userId],
+    });
 
     if (result.rows.length === 0) {
       const error = new Error('User profile not found.');
@@ -130,37 +135,39 @@ export const authService = {
   async getProfiles({ role, status, search, page = 1, limit = 20 }) {
     const offset = (page - 1) * limit;
     const conditions = [];
-    const params = [];
+    const args = [];
 
     if (role) {
-      params.push(role);
-      conditions.push(`role = $${params.length}`);
+      conditions.push('role = ?');
+      args.push(role);
     }
     if (status) {
-      params.push(status);
-      conditions.push(`status = $${params.length}`);
+      conditions.push('status = ?');
+      args.push(status);
     }
     if (search) {
-      params.push(`%${search}%`);
-      conditions.push(`(full_name ILIKE $${params.length} OR badge_number ILIKE $${params.length} OR email ILIKE $${params.length})`);
+      conditions.push('(full_name LIKE ? OR badge_number LIKE ? OR email LIKE ?)');
+      const term = `%${search}%`;
+      args.push(term, term, term);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const countQuery = `SELECT COUNT(*) FROM profiles ${whereClause}`;
-    const totalCountRes = await pool.query(countQuery, params);
-    const total = parseInt(totalCountRes.rows[0].count, 10);
+    const countQuery = `SELECT COUNT(*) AS count FROM profiles ${whereClause}`;
+    const totalCountRes = await turso.execute({ sql: countQuery, args });
+    const total = Number(totalCountRes.rows[0].count);
 
-    params.push(limit);
-    params.push(offset);
     const selectQuery = `
       SELECT id, full_name, badge_number, email, role, phone_number, status, created_at, updated_at
       FROM profiles
       ${whereClause}
       ORDER BY created_at DESC
-      LIMIT $${params.length - 1} OFFSET $${params.length}
+      LIMIT ? OFFSET ?
     `;
-    const result = await pool.query(selectQuery, params);
+    const result = await turso.execute({
+      sql: selectQuery,
+      args: [...args, limit, offset],
+    });
 
     return {
       profiles: result.rows,
@@ -176,35 +183,28 @@ export const authService = {
   async updateProfile(userId, updateData, actorId = null, ipAddress = null) {
     const { full_name, phone_number } = updateData;
     const updates = [];
-    const params = [];
+    const args = [];
 
     if (full_name !== undefined) {
-      params.push(full_name);
-      updates.push(`full_name = $${params.length}`);
+      updates.push('full_name = ?');
+      args.push(full_name);
     }
     if (phone_number !== undefined) {
-      params.push(phone_number);
-      updates.push(`phone_number = $${params.length}`);
+      updates.push('phone_number = ?');
+      args.push(phone_number);
     }
 
     if (updates.length === 0) {
       return this.getProfile(userId);
     }
 
-    params.push(userId);
+    args.push(userId);
     const query = `
       UPDATE profiles
-      SET ${updates.join(', ')}, updated_at = NOW()
-      WHERE id = $${params.length}
-      RETURNING id, full_name, badge_number, email, role, phone_number, status, updated_at
+      SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
     `;
-    const result = await pool.query(query, params);
-
-    if (result.rows.length === 0) {
-      const error = new Error('Profile not found.');
-      error.statusCode = 404;
-      throw error;
-    }
+    await turso.execute({ sql: query, args });
 
     await auditLogService.createLog({
       userId: actorId || userId,
@@ -215,36 +215,29 @@ export const authService = {
       ipAddress,
     });
 
-    return result.rows[0];
+    return this.getProfile(userId);
   },
 
   async updateRoleAndStatus(userId, { role, status }, actorId, ipAddress = null) {
     const updates = [];
-    const params = [];
+    const args = [];
 
     if (role) {
-      params.push(role);
-      updates.push(`role = $${params.length}`);
+      updates.push('role = ?');
+      args.push(role);
     }
     if (status) {
-      params.push(status);
-      updates.push(`status = $${params.length}`);
+      updates.push('status = ?');
+      args.push(status);
     }
 
-    params.push(userId);
+    args.push(userId);
     const query = `
       UPDATE profiles
-      SET ${updates.join(', ')}, updated_at = NOW()
-      WHERE id = $${params.length}
-      RETURNING id, full_name, badge_number, email, role, phone_number, status, updated_at
+      SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
     `;
-    const result = await pool.query(query, params);
-
-    if (result.rows.length === 0) {
-      const error = new Error('Profile not found.');
-      error.statusCode = 404;
-      throw error;
-    }
+    await turso.execute({ sql: query, args });
 
     await auditLogService.createLog({
       userId: actorId,
@@ -255,6 +248,6 @@ export const authService = {
       ipAddress,
     });
 
-    return result.rows[0];
+    return this.getProfile(userId);
   },
 };

@@ -1,18 +1,9 @@
-import pg from 'pg';
+import { createClient } from '@libsql/client';
 import { ENV } from './env.js';
 
-const { Pool } = pg;
-
-export const pool = new Pool({
-  connectionString: ENV.DATABASE_URL,
-  ssl: ENV.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+export const turso = createClient({
+  url: ENV.TURSO_DATABASE_URL,
+  authToken: ENV.TURSO_AUTH_TOKEN || undefined,
 });
 
-pool.on('error', (err) => {
-  console.error('⚠️ Unexpected PostgreSQL client error on idle client:', err.message);
-});
-
-export const query = (text, params) => pool.query(text, params);
+export const db = turso;

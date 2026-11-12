@@ -1,4 +1,4 @@
-import { pool } from '../config/db.js';
+import { turso } from '../config/db.js';
 
 export const vehicleLookupService = {
   /**
@@ -10,11 +10,11 @@ export const vehicleLookupService = {
     const formattedPlate = plateNumber.trim().toUpperCase();
 
     // 1. Get total historical encounter count
-    const countRes = await pool.query(
-      `SELECT COUNT(*) AS total FROM incidents WHERE UPPER(plate_number) = $1`,
-      [formattedPlate]
-    );
-    const totalPriorIncidents = parseInt(countRes.rows[0].total, 10);
+    const countRes = await turso.execute({
+      sql: 'SELECT COUNT(*) AS total FROM incidents WHERE UPPER(plate_number) = UPPER(?)',
+      args: [formattedPlate],
+    });
+    const totalPriorIncidents = Number(countRes.rows[0].total);
 
     if (totalPriorIncidents === 0) {
       return {
@@ -42,11 +42,11 @@ export const vehicleLookupService = {
         incident_date AS last_incident_date,
         reference_number AS last_incident_reference
       FROM incidents
-      WHERE UPPER(plate_number) = $1
+      WHERE UPPER(plate_number) = UPPER(?)
       ORDER BY incident_date DESC
       LIMIT 1
     `;
-    const result = await pool.query(latestQuery, [formattedPlate]);
+    const result = await turso.execute({ sql: latestQuery, args: [formattedPlate] });
     const latestVehicle = result.rows[0];
 
     return {

@@ -1,6 +1,6 @@
 import app from './app.js';
 import { ENV } from './config/env.js';
-import { pool } from './config/db.js';
+import { turso } from './config/db.js';
 import { logger } from './utils/logger.js';
 
 const PORT = ENV.PORT || 5000;
@@ -13,13 +13,12 @@ const server = app.listen(PORT, async () => {
   logger.info(`🏥 Health Check: http://localhost:${PORT}/api/v1/health`);
   logger.info(`=======================================================`);
 
-  // Verify PostgreSQL Connectivity
+  // Verify Turso Connectivity
   try {
-    const res = await pool.query('SELECT NOW()');
-    logger.info(`✅ PostgreSQL Database Connected: ${res.rows[0].now}`);
+    const res = await turso.execute("SELECT datetime('now') AS now");
+    logger.info(`✅ Turso Database Connected: ${res.rows[0].now}`);
   } catch (err) {
-    logger.warn(`⚠️ PostgreSQL connection warning: ${err.message}`);
-    logger.warn(`👉 Make sure SQL scripts in sql/ are executed in Supabase SQL editor.`);
+    logger.warn(`⚠️ Turso connection warning: ${err.message}`);
   }
 });
 
@@ -29,10 +28,10 @@ const shutdown = async (signal) => {
   server.close(async () => {
     logger.info('HTTP server closed.');
     try {
-      await pool.end();
-      logger.info('Database pool closed.');
+      await turso.close();
+      logger.info('Turso connection closed.');
     } catch (err) {
-      logger.error('Error closing database pool:', err.message);
+      logger.error('Error closing Turso client:', err.message);
     }
     process.exit(0);
   });

@@ -1,54 +1,66 @@
-import { pool } from '../config/db.js';
+import crypto from 'crypto';
+import { turso } from '../config/db.js';
 import { AUDIT_ACTIONS } from '../constants/auditActions.js';
+import { auditLogService } from './auditLogService.js';
 
 export const locationService = {
   async getAllLocations(isActiveOnly = true) {
     const query = isActiveOnly
-      ? `SELECT * FROM locations WHERE is_active = true ORDER BY name ASC`
-      : `SELECT * FROM locations ORDER BY name ASC`;
-    const result = await pool.query(query);
-    return result.rows;
+      ? 'SELECT * FROM locations WHERE is_active = 1 ORDER BY name ASC'
+      : 'SELECT * FROM locations ORDER BY name ASC';
+    const result = await turso.execute(query);
+    return result.rows.map((r) => ({
+      ...r,
+      is_active: Boolean(r.is_active),
+    }));
   },
 
   async getLocationById(id) {
-    const result = await pool.query(`SELECT * FROM locations WHERE id = $1`, [id]);
+    const result = await turso.execute({
+      sql: 'SELECT * FROM locations WHERE id = ?',
+      args: [id],
+    });
     if (result.rows.length === 0) {
       const error = new Error('Location not found.');
       error.statusCode = 404;
       throw error;
     }
-    return result.rows[0];
+    const r = result.rows[0];
+    return {
+      ...r,
+      is_active: Boolean(r.is_active),
+    };
   },
 
   async createLocation(locationData, actorId, ipAddress = null) {
     const { name, code, area_or_zone, is_active } = locationData;
+    const id = crypto.randomUUID();
 
     const query = `
-      INSERT INTO locations (name, code, area_or_zone, is_active)
-      VALUES ($1, $2, $3, COALESCE($4, true))
-      RETURNING *
+      INSERT INTO locations (id, name, code, area_or_zone, is_active)
+      VALUES (?, ?, ?, ?, ?)
     `;
-    const result = await pool.query(query, [
-      name.trim(),
-      code.trim().toUpperCase(),
-      area_or_zone.trim(),
-      is_active,
-    ]);
+    await turso.execute({
+      sql: query,
+      args: [
+        id,
+        name.trim(),
+        code.trim().toUpperCase(),
+        area_or_zone.trim(),
+        is_active === false ? 0 : 1,
+      ],
+    });
 
-    const created = result.rows[0];
+    const created = await this.getLocationById(id);
 
-    const auditQuery = `
-      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await pool.query(auditQuery, [
-      actorId,
-      AUDIT_ACTIONS.LOCATION_CREATED,
-      'locations',
-      created.id,
-      JSON.stringify({ name: created.name, code: created.code }),
+    await auditLogService.createLog({
+      userId: actorId,
+      action: AUDIT_ACTIONS.LOCATION_CREATED,
+      entityType: 'locations',
+      entityId: id,
+      details: { name: created.name, code: created.code },
       ipAddress,
-    ]);
+    });
 
     return created;
   },
@@ -56,54 +68,43 @@ export const locationService = {
   async updateLocation(id, updateData, actorId, ipAddress = null) {
     const { name, area_or_zone, is_active } = updateData;
     const updates = [];
-    const params = [];
+    const args = [];
 
     if (name !== undefined) {
-      params.push(name.trim());
-      updates.push(`name = $${params.length}`);
+      updates.push('name = ?');
+      args.push(name.trim());
     }
     if (area_or_zone !== undefined) {
-      params.push(area_or_zone.trim());
-      updates.push(`area_or_zone = $${params.length}`);
+      updates.push('area_or_zone = ?');
+      args.push(area_or_zone.trim());
     }
     if (is_active !== undefined) {
-      params.push(is_active);
-      updates.push(`is_active = $${params.length}`);
+      updates.push('is_active = ?');
+      args.push(is_active ? 1 : 0);
     }
 
     if (updates.length === 0) {
       return this.getLocationById(id);
     }
 
-    params.push(id);
+    args.push(id);
     const query = `
       UPDATE locations
       SET ${updates.join(', ')}
-      WHERE id = $${params.length}
-      RETURNING *
+      WHERE id = ?
     `;
-    const result = await pool.query(query, params);
+    await turso.execute({ sql: query, args });
 
-    if (result.rows.length === 0) {
-      const error = new Error('Location not found.');
-      error.statusCode = 404;
-      throw error;
-    }
+    const updated = await this.getLocationById(id);
 
-    const updated = result.rows[0];
-
-    const auditQuery = `
-      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await pool.query(auditQuery, [
-      actorId,
-      AUDIT_ACTIONS.LOCATION_UPDATED,
-      'locations',
-      id,
-      JSON.stringify(updateData),
+    await auditLogService.createLog({
+      userId: actorId,
+      action: AUDIT_ACTIONS.LOCATION_UPDATED,
+      entityType: 'locations',
+      entityId: id,
+      details: updateData,
       ipAddress,
-    ]);
+    });
 
     return updated;
   },

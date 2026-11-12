@@ -8,7 +8,7 @@ import offenceRoutes from './offenceRoutes.js';
 import locationRoutes from './locationRoutes.js';
 import reportRoutes from './reportRoutes.js';
 import auditLogRoutes from './auditLogRoutes.js';
-import { pool } from '../config/db.js';
+import { turso } from '../config/db.js';
 
 const router = Router();
 
@@ -16,7 +16,7 @@ const router = Router();
 router.get('/health', async (req, res) => {
   let dbStatus = 'healthy';
   try {
-    await pool.query('SELECT 1');
+    await turso.execute('SELECT 1');
   } catch (err) {
     dbStatus = `unreachable (${err.message})`;
   }
@@ -24,6 +24,7 @@ router.get('/health', async (req, res) => {
   return res.status(200).json({
     status: 'ok',
     system: 'Traffic Offence Management System (TOMS) API',
+    database_engine: 'Turso (libSQL / SQLite)',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
     database: dbStatus,

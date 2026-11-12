@@ -1,4 +1,5 @@
-import { pool } from '../config/db.js';
+import crypto from 'crypto';
+import { turso } from '../config/db.js';
 import { AUDIT_ACTIONS } from '../constants/auditActions.js';
 
 export const correctionService = {
@@ -8,7 +9,11 @@ export const correctionService = {
    */
   async submitRequest({ incidentId, reason, proposedChanges, requesterId, ipAddress = null }) {
     // 1. Verify incident exists
-    const incidentCheck = await pool.query(`SELECT id, reference_number, agent_id FROM incidents WHERE id = $1`, [incidentId]);
+    const incidentCheck = await turso.execute({
+      sql: 'SELECT id, reference_number, agent_id FROM incidents WHERE id = ?',
+      args: [incidentId],
+    });
+
     if (incidentCheck.rows.length === 0) {
       const error = new Error('Incident not found.');
       error.statusCode = 404;
@@ -16,47 +21,52 @@ export const correctionService = {
     }
 
     const incident = incidentCheck.rows[0];
+    const requestId = crypto.randomUUID();
 
     // 2. Insert correction request
     const insertQuery = `
-      INSERT INTO correction_requests (incident_id, requested_by, reason, proposed_changes, status)
-      VALUES ($1, $2, $3, $4, 'pending')
-      RETURNING *
+      INSERT INTO correction_requests (id, incident_id, requested_by, reason, proposed_changes, status)
+      VALUES (?, ?, ?, ?, ?, 'pending')
     `;
-    const result = await pool.query(insertQuery, [
-      incidentId,
-      requesterId,
-      reason.trim(),
-      JSON.stringify(proposedChanges),
-    ]);
-
-    const createdRequest = result.rows[0];
+    await turso.execute({
+      sql: insertQuery,
+      args: [requestId, incidentId, requesterId, reason.trim(), JSON.stringify(proposedChanges)],
+    });
 
     // 3. Mark incident status as pending_correction
-    await pool.query(
-      `UPDATE incidents SET status = 'pending_correction', updated_at = NOW() WHERE id = $1`,
-      [incidentId]
-    );
+    await turso.execute({
+      sql: `UPDATE incidents SET status = 'pending_correction', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      args: [incidentId],
+    });
 
     // 4. Log audit event
-    const auditQuery = `
-      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await pool.query(auditQuery, [
-      requesterId,
-      AUDIT_ACTIONS.CORRECTION_REQUESTED,
-      'correction_requests',
-      createdRequest.id,
-      JSON.stringify({
-        incident_id: incidentId,
-        reference_number: incident.reference_number,
-        reason: reason.trim(),
-      }),
-      ipAddress,
-    ]);
+    const auditId = crypto.randomUUID();
+    await turso.execute({
+      sql: `INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details, ip_address)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        auditId,
+        requesterId,
+        AUDIT_ACTIONS.CORRECTION_REQUESTED,
+        'correction_requests',
+        requestId,
+        JSON.stringify({
+          incident_id: incidentId,
+          reference_number: incident.reference_number,
+          reason: reason.trim(),
+        }),
+        ipAddress || null,
+      ],
+    });
 
-    return createdRequest;
+    return {
+      id: requestId,
+      incident_id: incidentId,
+      requested_by: requesterId,
+      reason: reason.trim(),
+      proposed_changes: proposedChanges,
+      status: 'pending',
+    };
   },
 
   /**
@@ -65,31 +75,27 @@ export const correctionService = {
   async getRequests({ status, requesterId, isSupervisorOrAdmin, page = 1, limit = 20 }) {
     const offset = (page - 1) * limit;
     const conditions = [];
-    const params = [];
+    const args = [];
 
-    // If agent, restrict strictly to their own requests
     if (!isSupervisorOrAdmin) {
-      params.push(requesterId);
-      conditions.push(`cr.requested_by = $${params.length}`);
+      conditions.push('cr.requested_by = ?');
+      args.push(requesterId);
     } else if (requesterId) {
-      // Supervisor can optionally filter by a specific agent
-      params.push(requesterId);
-      conditions.push(`cr.requested_by = $${params.length}`);
+      conditions.push('cr.requested_by = ?');
+      args.push(requesterId);
     }
 
     if (status) {
-      params.push(status);
-      conditions.push(`cr.status = $${params.length}`);
+      conditions.push('cr.status = ?');
+      args.push(status);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const countQuery = `SELECT COUNT(*) FROM correction_requests cr ${whereClause}`;
-    const countRes = await pool.query(countQuery, params);
-    const total = parseInt(countRes.rows[0].count, 10);
+    const countQuery = `SELECT COUNT(*) AS count FROM correction_requests cr ${whereClause}`;
+    const countRes = await turso.execute({ sql: countQuery, args });
+    const total = Number(countRes.rows[0].count);
 
-    params.push(limit);
-    params.push(offset);
     const query = `
       SELECT 
         cr.*,
@@ -105,12 +111,21 @@ export const correctionService = {
       LEFT JOIN profiles rev_p ON cr.reviewed_by = rev_p.id
       ${whereClause}
       ORDER BY cr.created_at DESC
-      LIMIT $${params.length - 1} OFFSET $${params.length}
+      LIMIT ? OFFSET ?
     `;
-    const result = await pool.query(query, params);
+
+    const result = await turso.execute({
+      sql: query,
+      args: [...args, limit, offset],
+    });
+
+    const parsed = result.rows.map((row) => ({
+      ...row,
+      proposed_changes: typeof row.proposed_changes === 'string' ? JSON.parse(row.proposed_changes) : row.proposed_changes,
+    }));
 
     return {
-      requests: result.rows,
+      requests: parsed,
       pagination: {
         total,
         page: Number(page),
@@ -147,9 +162,9 @@ export const correctionService = {
       JOIN incidents i ON cr.incident_id = i.id
       JOIN profiles req_p ON cr.requested_by = req_p.id
       LEFT JOIN profiles rev_p ON cr.reviewed_by = rev_p.id
-      WHERE cr.id = $1
+      WHERE cr.id = ?
     `;
-    const result = await pool.query(query, [requestId]);
+    const result = await turso.execute({ sql: query, args: [requestId] });
 
     if (result.rows.length === 0) {
       const error = new Error('Correction request not found.');
@@ -157,23 +172,25 @@ export const correctionService = {
       throw error;
     }
 
-    return result.rows[0];
+    const row = result.rows[0];
+    return {
+      ...row,
+      proposed_changes: typeof row.proposed_changes === 'string' ? JSON.parse(row.proposed_changes) : row.proposed_changes,
+    };
   },
 
   /**
-   * Approves or rejects a correction request in an ACID database transaction.
+   * Approves or rejects a correction request in an interactive Turso transaction.
    */
   async reviewRequest({ requestId, status, rejectionReason, reviewerId, ipAddress = null }) {
-    const client = await pool.connect();
+    const tx = await turso.transaction('write');
 
     try {
-      await client.query('BEGIN');
-
-      // 1. Fetch and lock request
-      const requestRes = await client.query(
-        `SELECT * FROM correction_requests WHERE id = $1 FOR UPDATE`,
-        [requestId]
-      );
+      // 1. Fetch request
+      const requestRes = await tx.execute({
+        sql: 'SELECT * FROM correction_requests WHERE id = ?',
+        args: [requestId],
+      });
 
       if (requestRes.rows.length === 0) {
         const error = new Error('Correction request not found.');
@@ -190,32 +207,32 @@ export const correctionService = {
       }
 
       // 2. Fetch associated incident
-      const incidentRes = await client.query(
-        `SELECT * FROM incidents WHERE id = $1 FOR UPDATE`,
-        [request.incident_id]
-      );
+      const incidentRes = await tx.execute({
+        sql: 'SELECT * FROM incidents WHERE id = ?',
+        args: [request.incident_id],
+      });
       const incident = incidentRes.rows[0];
 
       if (status === 'rejected') {
-        // Update request as rejected
-        await client.query(
-          `UPDATE correction_requests 
-           SET status = 'rejected', rejection_reason = $1, reviewed_by = $2, reviewed_at = NOW()
-           WHERE id = $3`,
-          [rejectionReason, reviewerId, requestId]
-        );
+        await tx.execute({
+          sql: `UPDATE correction_requests 
+                SET status = 'rejected', rejection_reason = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+                WHERE id = ?`,
+          args: [rejectionReason, reviewerId, requestId],
+        });
 
-        // Revert incident status back to recorded (or original)
-        await client.query(
-          `UPDATE incidents SET status = 'recorded', updated_at = NOW() WHERE id = $1`,
-          [request.incident_id]
-        );
+        await tx.execute({
+          sql: `UPDATE incidents SET status = 'recorded', updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          args: [request.incident_id],
+        });
 
         // Audit Log
-        await client.query(
-          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
+        const auditLogId = crypto.randomUUID();
+        await tx.execute({
+          sql: `INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details, ip_address)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            auditLogId,
             reviewerId,
             AUDIT_ACTIONS.CORRECTION_REJECTED,
             'correction_requests',
@@ -225,69 +242,97 @@ export const correctionService = {
               reference_number: incident.reference_number,
               rejection_reason: rejectionReason,
             }),
-            ipAddress,
-          ]
-        );
+            ipAddress || null,
+          ],
+        });
       } else if (status === 'approved') {
-        const changes = request.proposed_changes;
+        const changes = typeof request.proposed_changes === 'string'
+          ? JSON.parse(request.proposed_changes)
+          : request.proposed_changes;
 
-        // Apply changes to incident snapshot
-        const updateIncidentQuery = `
-          UPDATE incidents SET
-            plate_number = COALESCE(UPPER(TRIM($1)), plate_number),
-            body_number = COALESCE(NULLIF(TRIM($2), ''), body_number),
-            vehicle_make = COALESCE(TRIM($3), vehicle_make),
-            vehicle_model = COALESCE(TRIM($4), vehicle_model),
-            vehicle_color = COALESCE(TRIM($5), vehicle_color),
-            vehicle_type = COALESCE(TRIM($6), vehicle_type),
-            vehicle_owner_name = COALESCE(NULLIF(TRIM($7), ''), vehicle_owner_name),
-            vehicle_owner_phone = COALESCE(NULLIF(TRIM($8), ''), vehicle_owner_phone),
-            driver_license_number = COALESCE(NULLIF(TRIM($9), ''), driver_license_number),
-            driver_name = COALESCE(NULLIF(TRIM($10), ''), driver_name),
-            location_id = CASE WHEN $11::boolean THEN NULLIF($12, '')::uuid ELSE location_id END,
-            manual_location = CASE WHEN $13::boolean THEN NULLIF($14, '') ELSE manual_location END,
-            location_description = CASE WHEN $15::boolean THEN NULLIF($16, '') ELSE location_description END,
-            remarks = CASE WHEN $17::boolean THEN NULLIF($18, '') ELSE remarks END,
-            status = 'amended',
-            updated_at = NOW()
-          WHERE id = $19
-        `;
+        // Dynamically build update fields for incident
+        const updates = ["status = 'amended'", 'updated_at = CURRENT_TIMESTAMP'];
+        const updateArgs = [];
 
-        await client.query(updateIncidentQuery, [
-          changes.plate_number || null,
-          changes.body_number || null,
-          changes.vehicle_make || null,
-          changes.vehicle_model || null,
-          changes.vehicle_color || null,
-          changes.vehicle_type || null,
-          changes.vehicle_owner_name || null,
-          changes.vehicle_owner_phone || null,
-          changes.driver_license_number || null,
-          changes.driver_name || null,
-          'location_id' in changes,
-          changes.location_id || null,
-          'manual_location' in changes,
-          changes.manual_location || null,
-          'location_description' in changes,
-          changes.location_description || null,
-          'remarks' in changes,
-          changes.remarks || null,
-          request.incident_id,
-        ]);
+        if (changes.plate_number !== undefined) {
+          updates.push('plate_number = ?');
+          updateArgs.push(changes.plate_number.trim().toUpperCase());
+        }
+        if (changes.body_number !== undefined) {
+          updates.push('body_number = ?');
+          updateArgs.push(changes.body_number ? changes.body_number.trim() : null);
+        }
+        if (changes.vehicle_make !== undefined) {
+          updates.push('vehicle_make = ?');
+          updateArgs.push(changes.vehicle_make.trim());
+        }
+        if (changes.vehicle_model !== undefined) {
+          updates.push('vehicle_model = ?');
+          updateArgs.push(changes.vehicle_model.trim());
+        }
+        if (changes.vehicle_color !== undefined) {
+          updates.push('vehicle_color = ?');
+          updateArgs.push(changes.vehicle_color.trim());
+        }
+        if (changes.vehicle_type !== undefined) {
+          updates.push('vehicle_type = ?');
+          updateArgs.push(changes.vehicle_type.trim());
+        }
+        if (changes.vehicle_owner_name !== undefined) {
+          updates.push('vehicle_owner_name = ?');
+          updateArgs.push(changes.vehicle_owner_name ? changes.vehicle_owner_name.trim() : null);
+        }
+        if (changes.vehicle_owner_phone !== undefined) {
+          updates.push('vehicle_owner_phone = ?');
+          updateArgs.push(changes.vehicle_owner_phone ? changes.vehicle_owner_phone.trim() : null);
+        }
+        if (changes.driver_license_number !== undefined) {
+          updates.push('driver_license_number = ?');
+          updateArgs.push(changes.driver_license_number ? changes.driver_license_number.trim() : null);
+        }
+        if (changes.driver_name !== undefined) {
+          updates.push('driver_name = ?');
+          updateArgs.push(changes.driver_name ? changes.driver_name.trim() : null);
+        }
+        if (changes.location_id !== undefined) {
+          updates.push('location_id = ?');
+          updateArgs.push(changes.location_id || null);
+        }
+        if (changes.manual_location !== undefined) {
+          updates.push('manual_location = ?');
+          updateArgs.push(changes.manual_location || null);
+        }
+        if (changes.location_description !== undefined) {
+          updates.push('location_description = ?');
+          updateArgs.push(changes.location_description || null);
+        }
+        if (changes.remarks !== undefined) {
+          updates.push('remarks = ?');
+          updateArgs.push(changes.remarks || null);
+        }
 
-        // Update request as approved
-        await client.query(
-          `UPDATE correction_requests 
-           SET status = 'approved', reviewed_by = $1, reviewed_at = NOW()
-           WHERE id = $2`,
-          [reviewerId, requestId]
-        );
+        updateArgs.push(request.incident_id);
 
-        // Audit Log
-        await client.query(
-          `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
+        await tx.execute({
+          sql: `UPDATE incidents SET ${updates.join(', ')} WHERE id = ?`,
+          args: updateArgs,
+        });
+
+        // Mark request approved
+        await tx.execute({
+          sql: `UPDATE correction_requests 
+                SET status = 'approved', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+                WHERE id = ?`,
+          args: [reviewerId, requestId],
+        });
+
+        // Write Audit Log
+        const auditLogId = crypto.randomUUID();
+        await tx.execute({
+          sql: `INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details, ip_address)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            auditLogId,
             reviewerId,
             AUDIT_ACTIONS.CORRECTION_APPROVED,
             'correction_requests',
@@ -298,12 +343,12 @@ export const correctionService = {
               requested_by: request.requested_by,
               applied_changes: changes,
             }),
-            ipAddress,
-          ]
-        );
+            ipAddress || null,
+          ],
+        });
       }
 
-      await client.query('COMMIT');
+      await tx.commit();
 
       return {
         request_id: requestId,
@@ -312,10 +357,8 @@ export const correctionService = {
         reviewed_at: new Date().toISOString(),
       };
     } catch (error) {
-      await client.query('ROLLBACK');
+      await tx.rollback();
       throw error;
-    } finally {
-      client.release();
     }
   },
 };

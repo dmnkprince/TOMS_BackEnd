@@ -1,4 +1,4 @@
-import { pool } from '../config/db.js';
+import { turso } from '../config/db.js';
 
 export const reportService = {
   /**
@@ -6,7 +6,7 @@ export const reportService = {
    */
   async getSummaryStats() {
     // 1. Total incidents and total fines
-    const incidentsStats = await pool.query(`
+    const incidentsStats = await turso.execute(`
       SELECT 
         COUNT(DISTINCT i.id) AS total_incidents,
         COALESCE(SUM(io.fine_amount), 0) AS total_fines_amount,
@@ -16,16 +16,16 @@ export const reportService = {
     `);
 
     // 2. Incidents today & this month
-    const timelineStats = await pool.query(`
+    const timelineStats = await turso.execute(`
       SELECT
-        COUNT(*) FILTER (WHERE incident_date >= CURRENT_DATE) AS incidents_today,
-        COUNT(*) FILTER (WHERE incident_date >= date_trunc('month', CURRENT_DATE)) AS incidents_this_month,
-        COUNT(*) FILTER (WHERE status = 'pending_correction') AS pending_corrections
+        COUNT(CASE WHEN date(incident_date) = date('now') THEN 1 END) AS incidents_today,
+        COUNT(CASE WHEN strftime('%Y-%m', incident_date) = strftime('%Y-%m', 'now') THEN 1 END) AS incidents_this_month,
+        COUNT(CASE WHEN status = 'pending_correction' THEN 1 END) AS pending_corrections
       FROM incidents
     `);
 
     // 3. Active officers count
-    const officerStats = await pool.query(`
+    const officerStats = await turso.execute(`
       SELECT COUNT(*) AS active_officers 
       FROM profiles 
       WHERE role = 'agent' AND status = 'active'
@@ -33,13 +33,13 @@ export const reportService = {
 
     return {
       overview: {
-        total_incidents: parseInt(incidentsStats.rows[0].total_incidents, 10),
-        total_fines_amount: parseFloat(incidentsStats.rows[0].total_fines_amount),
-        unique_vehicles_encountered: parseInt(incidentsStats.rows[0].unique_vehicles_encountered, 10),
-        incidents_today: parseInt(timelineStats.rows[0].incidents_today, 10),
-        incidents_this_month: parseInt(timelineStats.rows[0].incidents_this_month, 10),
-        pending_corrections: parseInt(timelineStats.rows[0].pending_corrections, 10),
-        active_officers: parseInt(officerStats.rows[0].active_officers, 10),
+        total_incidents: Number(incidentsStats.rows[0].total_incidents),
+        total_fines_amount: Number(incidentsStats.rows[0].total_fines_amount),
+        unique_vehicles_encountered: Number(incidentsStats.rows[0].unique_vehicles_encountered),
+        incidents_today: Number(timelineStats.rows[0].incidents_today),
+        incidents_this_month: Number(timelineStats.rows[0].incidents_this_month),
+        pending_corrections: Number(timelineStats.rows[0].pending_corrections),
+        active_officers: Number(officerStats.rows[0].active_officers),
       },
     };
   },
@@ -60,13 +60,13 @@ export const reportService = {
       JOIN incident_offences io ON ot.id = io.offence_type_id
       GROUP BY ot.id, ot.code, ot.title, ot.category
       ORDER BY occurrence_count DESC
-      LIMIT $1
+      LIMIT ?
     `;
-    const result = await pool.query(query, [limit]);
+    const result = await turso.execute({ sql: query, args: [limit] });
     return result.rows.map((row) => ({
       ...row,
-      occurrence_count: parseInt(row.occurrence_count, 10),
-      total_fine_generated: parseFloat(row.total_fine_generated),
+      occurrence_count: Number(row.occurrence_count),
+      total_fine_generated: Number(row.total_fine_generated),
     }));
   },
 
@@ -74,16 +74,16 @@ export const reportService = {
    * Officer performance metrics (Supervisors and Admins).
    */
   async getAgentPerformance({ startDate, endDate } = {}) {
-    const conditions = [`p.role = 'agent'`];
-    const params = [];
+    const conditions = ["p.role = 'agent'"];
+    const args = [];
 
     if (startDate) {
-      params.push(startDate);
-      conditions.push(`i.incident_date >= $${params.length}::timestamptz`);
+      conditions.push('i.incident_date >= ?');
+      args.push(startDate);
     }
     if (endDate) {
-      params.push(endDate);
-      conditions.push(`i.incident_date <= $${params.length}::timestamptz`);
+      conditions.push('i.incident_date <= ?');
+      args.push(endDate);
     }
 
     const query = `
@@ -102,11 +102,11 @@ export const reportService = {
       GROUP BY p.id, p.full_name, p.badge_number, p.status
       ORDER BY total_incidents_recorded DESC
     `;
-    const result = await pool.query(query, params);
+    const result = await turso.execute({ sql: query, args });
     return result.rows.map((row) => ({
       ...row,
-      total_incidents_recorded: parseInt(row.total_incidents_recorded, 10),
-      total_fines_levied: parseFloat(row.total_fines_levied),
+      total_incidents_recorded: Number(row.total_incidents_recorded),
+      total_fines_levied: Number(row.total_fines_levied),
     }));
   },
 
@@ -123,15 +123,15 @@ export const reportService = {
       FROM incidents i
       LEFT JOIN locations l ON i.location_id = l.id
       LEFT JOIN incident_offences io ON i.id = io.incident_id
-      GROUP BY l.name, i.manual_location, l.area_or_zone
+      GROUP BY location_name, zone
       ORDER BY violation_count DESC
-      LIMIT $1
+      LIMIT ?
     `;
-    const result = await pool.query(query, [limit]);
+    const result = await turso.execute({ sql: query, args: [limit] });
     return result.rows.map((row) => ({
       ...row,
-      violation_count: parseInt(row.violation_count, 10),
-      total_fines: parseFloat(row.total_fines),
+      violation_count: Number(row.violation_count),
+      total_fines: Number(row.total_fines),
     }));
   },
 };

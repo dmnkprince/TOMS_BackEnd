@@ -1,6 +1,6 @@
 # TOMS (Traffic Offence Management System) — Backend REST API
 
-A secure, scalable REST API backend for the **Traffic Offence Management System (TOMS)** built with **Node.js, Express.js (ES Modules), Supabase, and PostgreSQL**.
+A secure, scalable REST API backend for the **Traffic Offence Management System (TOMS)** built with **Node.js, Express.js (ES Modules), and Turso (libSQL / SQLite)**.
 
 ---
 
@@ -32,35 +32,36 @@ All default accounts have password: **`Password123!`**
 
 ## 3. Getting Started
 
-### Step 1: Execute Database Setup in Supabase
-1. Open your [Supabase Dashboard](https://supabase.com).
-2. Go to **SQL Editor** -> **New query**.
-3. Copy the entire contents of [`sql/complete_setup.sql`](./sql/complete_setup.sql) and paste into the editor.
-4. Click **Run**. All 7 tables, indexes, atomic functions, and seed data will be created!
-
-### Step 2: Configure Environment Variables
-Copy `.env.example` to `.env` and verify your connection string and keys:
+### Database Configuration
+Your backend is connected to **Turso Cloud DB** (`toms-db-dmnkprince`).
+Credentials are set in `.env`:
 ```env
 PORT=5000
 NODE_ENV=development
-DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres
-SUPABASE_URL=https://[PROJECT-REF].supabase.co
-SUPABASE_ANON_KEY=[YOUR-ANON-KEY]
-SUPABASE_SERVICE_ROLE_KEY=[YOUR-SERVICE-ROLE-KEY]
+TURSO_DATABASE_URL=libsql://toms-db-dmnkprince.aws-eu-west-1.turso.io
+TURSO_AUTH_TOKEN=eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9...
 JWT_SECRET=toms_super_secret_jwt_key_2026_secure_traffic_enforcement
 JWT_EXPIRES_IN=24h
 CORS_ORIGIN=*
 ```
 
-> **Note on IPv6 / Direct vs Pooler Connection:**
-> If your ISP does not route direct IPv6 connections to `db.[PROJECT-REF].supabase.co`, use the Supabase **Connection Pooler** URI available in **Project Settings -> Database -> Connection string -> Mode: Session**.
+### Run Migrations & Seed Data
+```bash
+npm run migrate
+```
 
-### Step 3: Run the Server
+### Run Automated Integration Tests
+```bash
+npm test
+```
+Tests end-to-end authentication, vehicle lookup, multi-offence incident registration, deduplicated search, correction lifecycle, and reports.
+
+### Start the Server
 ```bash
 # Start development server with hot-reload
 npm run dev
 
-# Or start standard production server
+# Or start standard server
 npm start
 ```
 - API Base: `http://localhost:5000/api/v1`
@@ -132,13 +133,13 @@ Atomically records incident + vehicle snapshot + one or more offences + audit lo
   "vehicle_owner_phone": "+2348033000000",
   "driver_license_number": "DL-908122",
   "driver_name": "John Doe",
-  "location_id": "...", // UUID or omit and provide manual_location
+  "location_id": "loc-cbd-01", // Or omit and provide manual_location
   "manual_location": "Mile 12 Bus Stop, Ikorodu Road",
   "location_description": "Northbound lane near pedestrian bridge",
   "remarks": "Driver refused initial stop request",
   "offences": [
-    { "offence_type_id": "...", "fine_amount": 25000, "notes": "Disobeyed red traffic light" },
-    { "offence_type_id": "...", "notes": "Failure to produce driving license" }
+    { "offence_type_id": "off-sig-01", "fine_amount": 25000, "notes": "Disobeyed red traffic light" },
+    { "offence_type_id": "off-doc-01", "notes": "Failure to produce driving license" }
   ]
 }
 ```
@@ -151,8 +152,8 @@ Advanced multi-filter search with pagination and deduplication.
 - `vehicle_type`: Sedan, SUV, Motorcycle, Truck, etc.
 - `vehicle_make`: Toyota, Honda, Mercedes, etc.
 - `category`: Offence category (e.g. `Speeding`, `Safety`)
-- `agent_id`: UUID of recording officer
-- `location_id`: UUID of enforcement zone
+- `agent_id`: UUID/ID of recording officer
+- `location_id`: ID of enforcement zone
 - `start_date` / `end_date`: ISO date range filters
 - `page` (default 1) & `limit` (default 20)
 
@@ -165,7 +166,7 @@ Submits proposed amendments to an incident record.
 
 ```json
 {
-  "incident_id": "c1f7a184-...",
+  "incident_id": "e48bcca9-...",
   "reason": "Plate number was entered with a typographical error (O instead of 0).",
   "proposed_changes": {
     "plate_number": "KJA-820-XP"
@@ -211,9 +212,9 @@ Approves or rejects correction request. On approval, applies changes transaction
 
 ---
 
-## 5. Security & Verification
+## 5. Security Highlights
 
 - **Role-Based Access Control (RBAC):** Backend permissions enforced at the route level via `authorize([...])`.
 - **Input Sanitization & Validation:** Strict schema validation with **Zod** on all input payloads.
 - **Rate Limiting:** Protects against brute-force and DDoS via `express-rate-limit`.
-- **Database Transactions:** ACID compliance for multi-record operations (incident creation and correction approval).
+- **Database Transactions:** ACID compliance with Turso interactive transactions (`turso.transaction('write')`).

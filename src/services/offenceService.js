@@ -1,18 +1,20 @@
-import { pool } from '../config/db.js';
+import crypto from 'crypto';
+import { turso } from '../config/db.js';
 import { AUDIT_ACTIONS } from '../constants/auditActions.js';
+import { auditLogService } from './auditLogService.js';
 
 export const offenceService = {
   async getAllOffences({ category, isActiveOnly = true } = {}) {
     const conditions = [];
-    const params = [];
+    const args = [];
 
     if (isActiveOnly) {
-      conditions.push(`is_active = true`);
+      conditions.push('is_active = 1');
     }
 
     if (category) {
-      params.push(`%${category}%`);
-      conditions.push(`category ILIKE $${params.length}`);
+      conditions.push('category LIKE ?');
+      args.push(`%${category}%`);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -22,149 +24,143 @@ export const offenceService = {
       ${whereClause}
       ORDER BY category ASC, title ASC
     `;
-    const result = await pool.query(query, params);
-    return result.rows;
+    const result = await turso.execute({ sql: query, args });
+    return result.rows.map((r) => ({
+      ...r,
+      is_active: Boolean(r.is_active),
+      penalty_amount: Number(r.penalty_amount),
+      demerit_points: Number(r.demerit_points),
+    }));
   },
 
   async getOffenceById(id) {
-    const result = await pool.query(`SELECT * FROM offence_types WHERE id = $1`, [id]);
+    const result = await turso.execute({
+      sql: 'SELECT * FROM offence_types WHERE id = ?',
+      args: [id],
+    });
     if (result.rows.length === 0) {
       const error = new Error('Offence type not found.');
       error.statusCode = 404;
       throw error;
     }
-    return result.rows[0];
+    const r = result.rows[0];
+    return {
+      ...r,
+      is_active: Boolean(r.is_active),
+      penalty_amount: Number(r.penalty_amount),
+      demerit_points: Number(r.demerit_points),
+    };
   },
 
   async createOffence(offenceData, actorId, ipAddress = null) {
     const { code, title, description, category, penalty_amount, demerit_points, is_active } = offenceData;
+    const id = crypto.randomUUID();
 
     const query = `
-      INSERT INTO offence_types (code, title, description, category, penalty_amount, demerit_points, is_active)
-      VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, true))
-      RETURNING *
+      INSERT INTO offence_types (id, code, title, description, category, penalty_amount, demerit_points, is_active)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `;
-    const result = await pool.query(query, [
-      code.trim().toUpperCase(),
-      title.trim(),
-      description || null,
-      category.trim(),
-      penalty_amount,
-      demerit_points || 0,
-      is_active,
-    ]);
+    await turso.execute({
+      sql: query,
+      args: [
+        id,
+        code.trim().toUpperCase(),
+        title.trim(),
+        description || null,
+        category.trim(),
+        penalty_amount,
+        demerit_points || 0,
+        is_active === false ? 0 : 1,
+      ],
+    });
 
-    const created = result.rows[0];
+    const created = await this.getOffenceById(id);
 
-    // Audit Log
-    const auditQuery = `
-      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await pool.query(auditQuery, [
-      actorId,
-      AUDIT_ACTIONS.OFFENCE_TYPE_CREATED,
-      'offence_types',
-      created.id,
-      JSON.stringify({ code: created.code, title: created.title, penalty_amount }),
+    await auditLogService.createLog({
+      userId: actorId,
+      action: AUDIT_ACTIONS.OFFENCE_TYPE_CREATED,
+      entityType: 'offence_types',
+      entityId: id,
+      details: { code: created.code, title: created.title, penalty_amount },
       ipAddress,
-    ]);
+    });
 
     return created;
   },
 
   async updateOffence(id, updateData, actorId, ipAddress = null) {
     const { title, description, category, penalty_amount, demerit_points, is_active } = updateData;
-    const updates = [];
-    const params = [];
+    const updates = ['updated_at = CURRENT_TIMESTAMP'];
+    const args = [];
 
     if (title !== undefined) {
-      params.push(title.trim());
-      updates.push(`title = $${params.length}`);
+      updates.push('title = ?');
+      args.push(title.trim());
     }
     if (description !== undefined) {
-      params.push(description);
-      updates.push(`description = $${params.length}`);
+      updates.push('description = ?');
+      args.push(description);
     }
     if (category !== undefined) {
-      params.push(category.trim());
-      updates.push(`category = $${params.length}`);
+      updates.push('category = ?');
+      args.push(category.trim());
     }
     if (penalty_amount !== undefined) {
-      params.push(penalty_amount);
-      updates.push(`penalty_amount = $${params.length}`);
+      updates.push('penalty_amount = ?');
+      args.push(penalty_amount);
     }
     if (demerit_points !== undefined) {
-      params.push(demerit_points);
-      updates.push(`demerit_points = $${params.length}`);
+      updates.push('demerit_points = ?');
+      args.push(demerit_points);
     }
     if (is_active !== undefined) {
-      params.push(is_active);
-      updates.push(`is_active = $${params.length}`);
+      updates.push('is_active = ?');
+      args.push(is_active ? 1 : 0);
     }
 
-    if (updates.length === 0) {
-      return this.getOffenceById(id);
-    }
-
-    params.push(id);
+    args.push(id);
     const query = `
       UPDATE offence_types
-      SET ${updates.join(', ')}, updated_at = NOW()
-      WHERE id = $${params.length}
-      RETURNING *
+      SET ${updates.join(', ')}
+      WHERE id = ?
     `;
-    const result = await pool.query(query, params);
+    await turso.execute({ sql: query, args });
 
-    if (result.rows.length === 0) {
-      const error = new Error('Offence type not found.');
-      error.statusCode = 404;
-      throw error;
-    }
+    const updated = await this.getOffenceById(id);
 
-    const updated = result.rows[0];
-
-    const auditQuery = `
-      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await pool.query(auditQuery, [
-      actorId,
-      AUDIT_ACTIONS.OFFENCE_TYPE_UPDATED,
-      'offence_types',
-      id,
-      JSON.stringify(updateData),
+    await auditLogService.createLog({
+      userId: actorId,
+      action: AUDIT_ACTIONS.OFFENCE_TYPE_UPDATED,
+      entityType: 'offence_types',
+      entityId: id,
+      details: updateData,
       ipAddress,
-    ]);
+    });
 
     return updated;
   },
 
   async toggleStatus(id, actorId, ipAddress = null) {
     const current = await this.getOffenceById(id);
-    const newStatus = !current.is_active;
+    const newStatus = current.is_active ? 0 : 1;
 
     const query = `
       UPDATE offence_types
-      SET is_active = $1, updated_at = NOW()
-      WHERE id = $2
-      RETURNING *
+      SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
     `;
-    const result = await pool.query(query, [newStatus, id]);
-    const updated = result.rows[0];
+    await turso.execute({ sql: query, args: [newStatus, id] });
 
-    const auditQuery = `
-      INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `;
-    await pool.query(auditQuery, [
-      actorId,
-      AUDIT_ACTIONS.OFFENCE_TYPE_TOGGLED,
-      'offence_types',
-      id,
-      JSON.stringify({ is_active: newStatus }),
+    const updated = await this.getOffenceById(id);
+
+    await auditLogService.createLog({
+      userId: actorId,
+      action: AUDIT_ACTIONS.OFFENCE_TYPE_TOGGLED,
+      entityType: 'offence_types',
+      entityId: id,
+      details: { is_active: Boolean(newStatus) },
       ipAddress,
-    ]);
+    });
 
     return updated;
   },

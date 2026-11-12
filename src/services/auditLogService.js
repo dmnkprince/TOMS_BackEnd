@@ -1,4 +1,5 @@
-import { pool } from '../config/db.js';
+import crypto from 'crypto';
+import { turso } from '../config/db.js';
 
 export const auditLogService = {
   /**
@@ -6,23 +7,26 @@ export const auditLogService = {
    */
   async createLog({ userId, action, entityType, entityId, details = {}, ipAddress = null }) {
     try {
+      const id = crypto.randomUUID();
       const query = `
-        INSERT INTO audit_logs (user_id, action, entity_type, entity_id, details, ip_address)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, created_at
+        INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, details, ip_address)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `;
-      const result = await pool.query(query, [
-        userId || null,
-        action,
-        entityType,
-        entityId || null,
-        JSON.stringify(details),
-        ipAddress,
-      ]);
-      return result.rows[0];
+      await turso.execute({
+        sql: query,
+        args: [
+          id,
+          userId || null,
+          action,
+          entityType,
+          entityId || null,
+          JSON.stringify(details),
+          ipAddress || null,
+        ],
+      });
+      return { id, action, created_at: new Date().toISOString() };
     } catch (error) {
       console.error('⚠️ Failed to write audit log:', error.message);
-      // Non-blocking so core operations don't fail if audit log table has temporary issues
       return null;
     }
   },
@@ -33,37 +37,35 @@ export const auditLogService = {
   async getLogs({ page = 1, limit = 50, action, entityType, userId, startDate, endDate }) {
     const offset = (page - 1) * limit;
     const conditions = [];
-    const params = [];
+    const args = [];
 
     if (action) {
-      params.push(action);
-      conditions.push(`a.action = $${params.length}`);
+      conditions.push('a.action = ?');
+      args.push(action);
     }
     if (entityType) {
-      params.push(entityType);
-      conditions.push(`a.entity_type = $${params.length}`);
+      conditions.push('a.entity_type = ?');
+      args.push(entityType);
     }
     if (userId) {
-      params.push(userId);
-      conditions.push(`a.user_id = $${params.length}`);
+      conditions.push('a.user_id = ?');
+      args.push(userId);
     }
     if (startDate) {
-      params.push(startDate);
-      conditions.push(`a.created_at >= $${params.length}::timestamptz`);
+      conditions.push('a.created_at >= ?');
+      args.push(startDate);
     }
     if (endDate) {
-      params.push(endDate);
-      conditions.push(`a.created_at <= $${params.length}::timestamptz`);
+      conditions.push('a.created_at <= ?');
+      args.push(endDate);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-    const countQuery = `SELECT COUNT(*) FROM audit_logs a ${whereClause}`;
-    const totalCountRes = await pool.query(countQuery, params);
-    const total = parseInt(totalCountRes.rows[0].count, 10);
+    const countQuery = `SELECT COUNT(*) AS count FROM audit_logs a ${whereClause}`;
+    const countRes = await turso.execute({ sql: countQuery, args });
+    const total = Number(countRes.rows[0].count);
 
-    params.push(limit);
-    params.push(offset);
     const selectQuery = `
       SELECT 
         a.id,
@@ -80,12 +82,20 @@ export const auditLogService = {
       LEFT JOIN profiles p ON a.user_id = p.id
       ${whereClause}
       ORDER BY a.created_at DESC
-      LIMIT $${params.length - 1} OFFSET $${params.length}
+      LIMIT ? OFFSET ?
     `;
-    const result = await pool.query(selectQuery, params);
+    const result = await turso.execute({
+      sql: selectQuery,
+      args: [...args, limit, offset],
+    });
+
+    const parsedLogs = result.rows.map((row) => ({
+      ...row,
+      details: typeof row.details === 'string' ? JSON.parse(row.details) : row.details,
+    }));
 
     return {
-      logs: result.rows,
+      logs: parsedLogs,
       pagination: {
         total,
         page: Number(page),

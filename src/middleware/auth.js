@@ -1,7 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { ENV } from '../config/env.js';
-import { pool } from '../config/db.js';
-import { supabase } from '../config/supabase.js';
+import { turso } from '../config/db.js';
 import { STATUS_CODES } from '../constants/statusCodes.js';
 
 export const authenticate = async (req, res, next) => {
@@ -15,45 +14,26 @@ export const authenticate = async (req, res, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    let userId = null;
-    let userEmail = null;
+    let decoded;
 
-    // 1. Attempt Supabase Auth verification if available
     try {
-      if (ENV.SUPABASE_ANON_KEY && !ENV.SUPABASE_ANON_KEY.startsWith('dummy')) {
-        const { data: { user }, error } = await supabase.auth.getUser(token);
-        if (user && !error) {
-          userId = user.id;
-          userEmail = user.email;
-        }
-      }
-    } catch (sbErr) {
-      // Fallback to local JWT verification
+      decoded = jwt.verify(token, ENV.JWT_SECRET);
+    } catch (jwtErr) {
+      return res.status(STATUS_CODES.UNAUTHORIZED).json({
+        success: false,
+        message: 'Invalid or expired session token.',
+        error: jwtErr.message,
+      });
     }
 
-    // 2. If not verified via Supabase, verify using local JWT
-    if (!userId) {
-      try {
-        const decoded = jwt.verify(token, ENV.JWT_SECRET);
-        userId = decoded.id;
-        userEmail = decoded.email;
-      } catch (jwtErr) {
-        return res.status(STATUS_CODES.UNAUTHORIZED).json({
-          success: false,
-          message: 'Invalid or expired session token.',
-          error: jwtErr.message,
-        });
-      }
-    }
-
-    // 3. Fetch current profile from database
-    const profileResult = await pool.query(
-      `SELECT id, full_name, badge_number, email, role, phone_number, status 
-       FROM profiles 
-       WHERE id = $1 OR email = $2 
-       LIMIT 1`,
-      [userId, userEmail]
-    );
+    // Fetch current profile from Turso database
+    const profileResult = await turso.execute({
+      sql: `SELECT id, full_name, badge_number, email, role, phone_number, status 
+            FROM profiles 
+            WHERE id = ? OR email = ? 
+            LIMIT 1`,
+      args: [decoded.id, decoded.email],
+    });
 
     if (profileResult.rows.length === 0) {
       return res.status(STATUS_CODES.UNAUTHORIZED).json({
@@ -64,7 +44,7 @@ export const authenticate = async (req, res, next) => {
 
     const profile = profileResult.rows[0];
 
-    // 4. Ensure account is active
+    // Ensure account is active
     if (profile.status !== 'active') {
       return res.status(STATUS_CODES.FORBIDDEN).json({
         success: false,
