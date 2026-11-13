@@ -11,6 +11,7 @@ import {
 import { apiLimiter } from './middleware/rateLimiter.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import apiRouter from './routes/index.js';
+import authRoutes from './routes/authRoutes.js';
 
 const app = express();
 
@@ -43,6 +44,8 @@ app.use('/api/', apiLimiter);
 
 // 8. Mount Versioned Routes with Anti-Caching on Sensitive Data
 app.use('/api/v1', noCache, apiRouter);
+app.use('/api', noCache, apiRouter);
+app.use('/auth', noCache, authRoutes);
 
 // 9. Root Welcome Endpoint
 app.get('/', (req, res) => {
