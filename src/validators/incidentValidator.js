@@ -1,40 +1,52 @@
 import { z } from 'zod';
 
 const offenceItemSchema = z.object({
-  offence_type_id: z.string().uuid('Invalid offence type ID format'),
+  offence_type_id: z.string().min(1, 'Offence type ID format required'),
   fine_amount: z.number().nonnegative('Fine amount must be greater than or equal to 0').optional(),
-  notes: z.string().optional(),
+  notes: z.string().optional().nullable(),
 });
 
 export const registerIncidentSchema = z
   .object({
-    plate_number: z.string().min(2, 'Plate number is required (min 2 characters)').trim().toUpperCase(),
+    plate_number: z.string().min(2, 'Plate number is required').trim().toUpperCase().optional(),
+    vehiclePlate: z.string().min(2, 'Plate number is required').trim().toUpperCase().optional(),
     body_number: z.string().optional().nullable(),
-    vehicle_make: z.string().min(1, 'Vehicle make is required').trim(),
-    vehicle_model: z.string().min(1, 'Vehicle model is required').trim(),
-    vehicle_color: z.string().min(1, 'Vehicle color is required').trim(),
-    vehicle_type: z.string().min(1, 'Vehicle type is required (e.g. sedan, truck, motorcycle)').trim(),
+    vehicle_make: z.string().optional().default('Standard'),
+    vehicleMake: z.string().optional(),
+    vehicle_model: z.string().optional().default('Standard'),
+    vehicleModel: z.string().optional(),
+    vehicle_color: z.string().optional().default('Standard'),
+    vehicleColor: z.string().optional(),
+    vehicle_type: z.string().optional().default('Car'),
+    vehicleType: z.string().optional(),
     vehicle_owner_name: z.string().optional().nullable(),
     vehicle_owner_phone: z.string().optional().nullable(),
     driver_license_number: z.string().optional().nullable(),
     driver_name: z.string().optional().nullable(),
+    driverName: z.string().optional().nullable(),
+    time: z.string().optional().nullable(),
     
-    location_id: z.string().uuid('Invalid location UUID').optional().nullable(),
+    location_id: z.string().optional().nullable(),
     manual_location: z.string().optional().nullable(),
+    location: z.string().optional().nullable(),
     location_description: z.string().optional().nullable(),
 
-    incident_date: z.string().datetime({ offset: true }).optional().nullable(),
+    incident_date: z.string().optional().nullable(),
+    date: z.string().optional().nullable(),
     remarks: z.string().optional().nullable(),
+    description: z.string().optional().nullable(),
+    offenceType: z.string().optional().nullable(),
 
     offences: z
       .array(offenceItemSchema)
-      .min(1, 'An incident must contain at least one offence.'),
+      .optional()
+      .default([]),
   })
   .refine(
-    (data) => Boolean(data.location_id || (data.manual_location && data.manual_location.trim().length > 0)),
+    (data) => Boolean(data.plate_number || data.vehiclePlate),
     {
-      message: 'Either a predefined location_id or a manual_location must be provided.',
-      path: ['location_id'],
+      message: 'Vehicle Plate / Body Number is required.',
+      path: ['plate_number'],
     }
   );
 
@@ -47,8 +59,8 @@ export const incidentSearchQuerySchema = z.object({
   vehicle_make: z.string().optional(),
   vehicle_model: z.string().optional(),
   category: z.string().optional(),
-  agent_id: z.string().uuid().optional(),
-  location_id: z.string().uuid().optional(),
+  agent_id: z.string().optional(),
+  location_id: z.string().optional(),
   reference_number: z.string().optional(),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),

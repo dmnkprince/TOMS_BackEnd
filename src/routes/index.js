@@ -1,13 +1,10 @@
 import { Router } from 'express';
 import authRoutes from './authRoutes.js';
 import profileRoutes from './profileRoutes.js';
-import vehicleRoutes from './vehicleRoutes.js';
 import incidentRoutes from './incidentRoutes.js';
 import correctionRoutes from './correctionRoutes.js';
-import offenceRoutes from './offenceRoutes.js';
 import locationRoutes from './locationRoutes.js';
 import reportRoutes from './reportRoutes.js';
-import auditLogRoutes from './auditLogRoutes.js';
 import { turso } from '../config/db.js';
 
 const router = Router();
@@ -34,12 +31,9 @@ router.get('/health', async (req, res) => {
 // Mount Modules
 router.use('/auth', authRoutes);
 router.use('/profiles', profileRoutes);
-router.use('/vehicles', vehicleRoutes);
 router.use('/incidents', incidentRoutes);
 router.use('/corrections', correctionRoutes);
-router.use('/offence-types', offenceRoutes);
 router.use('/locations', locationRoutes);
 router.use('/reports', reportRoutes);
-router.use('/audit-logs', auditLogRoutes);
 
 export default router;

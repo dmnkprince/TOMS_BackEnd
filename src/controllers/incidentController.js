@@ -30,7 +30,16 @@ export const incidentController = {
    */
   async searchIncidents(req, res, next) {
     try {
-      const result = await incidentService.searchIncidents(req.query);
+      const queryParams = { ...req.query };
+
+      // Role-based visibility enforcement:
+      // Agents can ONLY view incidents they registered.
+      // Admins and supervisors can view incidents recorded by everyone.
+      if (req.user && req.user.role === 'agent') {
+        queryParams.agent_id = req.user.id;
+      }
+
+      const result = await incidentService.searchIncidents(queryParams);
 
       return sendResponse(res, STATUS_CODES.OK, 'Incidents retrieved successfully.', result);
     } catch (error) {

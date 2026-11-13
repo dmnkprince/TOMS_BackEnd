@@ -250,4 +250,106 @@ export const authService = {
 
     return this.getProfile(userId);
   },
+
+  passwordRequests: [
+    {
+      id: 'req-001',
+      officer_name: 'Officer David Okafor',
+      badge_number: 'AGT-101',
+      email: 'officer.david@toms.gov',
+      requested_password: 'Password2026!',
+      reason: 'Periodic mandatory credentials change',
+      status: 'pending',
+      requested_at: new Date(Date.now() - 3600 * 1000 * 4).toISOString(),
+      approved_by: null,
+      approved_at: null,
+    },
+    {
+      id: 'req-002',
+      officer_name: 'Officer Aisha Bello',
+      badge_number: 'AGT-102',
+      email: 'officer.aisha@toms.gov',
+      requested_password: 'SecurePass2026!',
+      reason: 'Password reset request after device re-assignment',
+      status: 'pending',
+      requested_at: new Date(Date.now() - 3600 * 1000 * 18).toISOString(),
+      approved_by: null,
+      approved_at: null,
+    },
+  ],
+
+  async requestPasswordChange(data) {
+    const { email, officer_name, badge_number, requested_password, reason } = data;
+    const newReq = {
+      id: 'req-' + Date.now(),
+      officer_name: officer_name || email?.split('@')[0] || 'Officer',
+      badge_number: badge_number || 'N/A',
+      email: (email || '').toLowerCase().trim(),
+      requested_password: requested_password || 'Password123!',
+      reason: reason || 'Credentials update',
+      status: 'pending',
+      requested_at: new Date().toISOString(),
+      approved_by: null,
+      approved_at: null,
+    };
+    this.passwordRequests.unshift(newReq);
+    return newReq;
+  },
+
+  async getPasswordRequests() {
+    return this.passwordRequests;
+  },
+
+  async approvePasswordRequest(requestId, adminUser) {
+    if (!adminUser || adminUser.role !== 'admin') {
+      const error = new Error('Access Denied: Only an Administrator can approve change of password.');
+      error.statusCode = 403;
+      throw error;
+    }
+    const req = this.passwordRequests.find((r) => r.id === requestId);
+    if (!req) {
+      const error = new Error('Password request not found.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    req.status = 'approved';
+    req.approved_by = adminUser.full_name || 'System Administrator';
+    req.approved_at = new Date().toISOString();
+
+    if (req.requested_password && req.email) {
+      try {
+        const salt = await bcrypt.genSalt(10);
+        const hash = await bcrypt.hash(req.requested_password, salt);
+        await turso.execute({
+          sql: 'UPDATE profiles SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(email) = LOWER(?)',
+          args: [hash, req.email],
+        });
+      } catch (e) {
+        console.warn('Could not update profile hash in DB:', e.message);
+      }
+    }
+
+    return req;
+  },
+
+  async rejectPasswordRequest(requestId, adminUser, reason = '') {
+    if (!adminUser || adminUser.role !== 'admin') {
+      const error = new Error('Access Denied: Only an Administrator can reject password changes.');
+      error.statusCode = 403;
+      throw error;
+    }
+    const req = this.passwordRequests.find((r) => r.id === requestId);
+    if (!req) {
+      const error = new Error('Password request not found.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    req.status = 'rejected';
+    req.rejection_reason = reason || 'Rejected by Administrator';
+    req.reviewed_by = adminUser.full_name || 'System Administrator';
+    req.reviewed_at = new Date().toISOString();
+    return req;
+  },
 };

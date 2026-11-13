@@ -8,34 +8,45 @@ export const incidentService = {
    * Atomically registers an incident with one or more offences and an audit log in Turso.
    */
   async registerIncident(incidentData, agentId, ipAddress = null) {
+    const plate = (incidentData.plate_number || incidentData.vehiclePlate || '').trim().toUpperCase();
+    const vType = (incidentData.vehicle_type || incidentData.vehicleType || 'Car').trim();
+    const dName = (incidentData.driver_name || incidentData.driverName || '').trim() || null;
+    const loc = (incidentData.manual_location || incidentData.location || '').trim() || 'Central Sector';
+    const incDate = incidentData.date && incidentData.time
+      ? `${incidentData.date}T${incidentData.time}`
+      : (incidentData.incident_date || incidentData.date || new Date().toISOString());
+    const notes = (incidentData.remarks || incidentData.description || '').trim() || null;
+
+    let offencesList = incidentData.offences;
+    if (!offencesList || offencesList.length === 0) {
+      offencesList = [
+        {
+          offence_type_id: 'off-spd-01',
+          fine_amount: 15000,
+          notes: incidentData.offenceType || 'General Traffic Violation',
+        },
+      ];
+    }
+
     const {
-      plate_number,
       body_number,
-      vehicle_make,
-      vehicle_model,
-      vehicle_color,
-      vehicle_type,
+      vehicle_make = 'Standard',
+      vehicle_model = 'Standard',
+      vehicle_color = 'Standard',
       vehicle_owner_name,
       vehicle_owner_phone,
       driver_license_number,
-      driver_name,
       location_id,
-      manual_location,
       location_description,
-      incident_date,
-      remarks,
-      offences,
     } = incidentData;
 
-    if (!offences || offences.length === 0) {
-      const error = new Error('An incident must contain at least one offence.');
-      error.statusCode = 400;
-      throw error;
-    }
+    const vMake = (incidentData.vehicleMake || vehicle_make || 'Standard').trim();
+    const vModel = (incidentData.vehicleModel || vehicle_model || 'Standard').trim();
+    const vColor = (incidentData.vehicleColor || vehicle_color || 'Standard').trim();
 
     const referenceNumber = generateReferenceNumber();
     const incidentId = crypto.randomUUID();
-    const dateValue = incident_date || new Date().toISOString();
+    const dateValue = incDate;
 
     // Begin interactive write transaction in Turso
     const tx = await turso.transaction('write');
@@ -74,32 +85,36 @@ export const incidentService = {
           agentId,
           dateValue,
           location_id || null,
-          manual_location || null,
+          loc,
           location_description || null,
-          plate_number.trim().toUpperCase(),
+          plate,
           body_number ? body_number.trim() : null,
-          vehicle_make.trim(),
-          vehicle_model.trim(),
-          vehicle_color.trim(),
-          vehicle_type.trim(),
+          vMake,
+          vModel,
+          vColor,
+          vType,
           vehicle_owner_name ? vehicle_owner_name.trim() : null,
           vehicle_owner_phone ? vehicle_owner_phone.trim() : null,
           driver_license_number ? driver_license_number.trim() : null,
-          driver_name ? driver_name.trim() : null,
-          remarks || null,
+          dName,
+          notes,
         ],
       });
 
       // 2. Insert Offences
       const insertedOffences = [];
-      for (const item of offences) {
+      for (const item of offencesList) {
         let fine = item.fine_amount;
         if (fine === undefined || fine === null) {
-          const defaultPenaltyRes = await tx.execute({
-            sql: 'SELECT penalty_amount FROM offence_types WHERE id = ?',
-            args: [item.offence_type_id],
-          });
-          fine = defaultPenaltyRes.rows[0]?.penalty_amount ?? 0.0;
+          try {
+            const defaultPenaltyRes = await tx.execute({
+              sql: 'SELECT penalty_amount FROM offence_types WHERE id = ?',
+              args: [item.offence_type_id],
+            });
+            fine = defaultPenaltyRes.rows[0]?.penalty_amount ?? 0.0;
+          } catch (e) {
+            fine = 0.0;
+          }
         }
 
         const offenceId = crypto.randomUUID();
@@ -304,8 +319,14 @@ export const incidentService = {
         offencesList = [];
       }
 
+      const dt = row.incident_date ? new Date(row.incident_date) : new Date();
+      const timeVal = !isNaN(dt.getTime()) ? dt.toLocaleTimeString('en-GB') : '12:00:00';
+      const dateVal = row.incident_date ? String(row.incident_date).slice(0, 10) : '—';
+
       return {
         ...row,
+        time: timeVal,
+        date: dateVal,
         offences: offencesList,
         total_fine_amount: Number(row.total_fine_amount),
       };
