@@ -7,17 +7,15 @@ import { AUDIT_ACTIONS } from '../constants/auditActions.js';
 import { auditLogService } from './auditLogService.js';
 
 export const authService = {
-  // Existing methods ...
   // Delete a user (admin / supervisor)
   async deleteUser(userId, actorId, ipAddress = null) {
-    // Ensure user exists
     const profile = await this.getProfile(userId);
-    // Delete user
+
     await turso.execute({
       sql: 'DELETE FROM profiles WHERE id = ?',
       args: [userId],
     });
-    // Audit log
+
     await auditLogService.createLog({
       userId: actorId,
       action: AUDIT_ACTIONS.USER_DELETED,
@@ -26,9 +24,95 @@ export const authService = {
       details: { deletedUserId: userId, role: profile.role },
       ipAddress,
     });
+
     return true;
   },
 
+  async requestPasswordChange(request) {
+    const { email, requested_password, reason, officer_name, badge_number } = request;
+    // Validate required fields
+    if (!email || !requested_password) {
+      const err = new Error('Email and requested_password are required.');
+      err.statusCode = 400;
+      throw err;
+    }
+    const id = crypto.randomUUID();
+    const requested_at = new Date().toISOString();
+    const insertSql = `
+      INSERT INTO password_requests (
+        id, officer_name, badge_number, email, requested_password, reason, status, requested_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `;
+    await turso.execute({
+      sql: insertSql,
+      args: [
+        id,
+        officer_name || null,
+        badge_number || null,
+        email,
+        requested_password,
+        reason || null,
+        requested_at,
+      ],
+    });
+    return { id, email, status: 'pending', requested_at };
+  },
+
+  async getPasswordRequests() {
+    const res = await turso.execute({ sql: 'SELECT * FROM password_requests ORDER BY requested_at DESC' });
+    return res.rows;
+  },
+
+  async approvePasswordRequest(requestId, admin) {
+    // Fetch the request
+    const reqRes = await turso.execute({ sql: 'SELECT * FROM password_requests WHERE id = ?', args: [requestId] });
+    if (reqRes.rows.length === 0) {
+      const err = new Error('Password change request not found.');
+      err.statusCode = 404;
+      throw err;
+    }
+    const request = reqRes.rows[0];
+    // Update user's password
+    const hash = await bcrypt.hash(request.requested_password, 10);
+    await turso.execute({
+      sql: 'UPDATE profiles SET password_hash = ?, password_change_approved = 1 WHERE email = ?',
+      args: [hash, request.email],
+    });
+    // Mark request as approved
+    await turso.execute({
+      sql: `UPDATE password_requests SET status = 'approved', approved_by = ?, approved_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      args: [admin.id, requestId],
+    });
+    await auditLogService.createLog({
+      userId: admin.id,
+      action: AUDIT_ACTIONS.PASSWORD_CHANGE_APPROVED,
+      entityType: 'password_requests',
+      entityId: requestId,
+      details: { email: request.email },
+    });
+    return { id: requestId, status: 'approved' };
+  },
+
+  async rejectPasswordRequest(requestId, admin, reason) {
+    const reqRes = await turso.execute({ sql: 'SELECT * FROM password_requests WHERE id = ?', args: [requestId] });
+    if (reqRes.rows.length === 0) {
+      const err = new Error('Password change request not found.');
+      err.statusCode = 404;
+      throw err;
+    }
+    await turso.execute({
+      sql: `UPDATE password_requests SET status = 'rejected', approved_by = ?, approved_at = CURRENT_TIMESTAMP, rejection_reason = ? WHERE id = ?`,
+      args: [admin.id, reason || null, requestId],
+    });
+    await auditLogService.createLog({
+      userId: admin.id,
+      action: AUDIT_ACTIONS.PASSWORD_CHANGE_REJECTED,
+      entityType: 'password_requests',
+      entityId: requestId,
+      details: { reason },
+    });
+    return { id: requestId, status: 'rejected' };
+  },
   async login(email, password, ipAddress = null) {
     const query = `
       SELECT id, full_name, badge_number, email, password_hash, role, phone_number, status
@@ -36,7 +120,11 @@ export const authService = {
       WHERE LOWER(email) = LOWER(?)
       LIMIT 1
     `;
-    const result = await turso.execute({ sql: query, args: [email] });
+
+    const result = await turso.execute({
+      sql: query,
+      args: [email],
+    });
 
     if (result.rows.length === 0) {
       const error = new Error('Invalid email or password.');
@@ -53,13 +141,13 @@ export const authService = {
     }
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
+
     if (!isMatch) {
       const error = new Error('Invalid email or password.');
       error.statusCode = 401;
       throw error;
     }
 
-    // Generate JWT Token
     const payload = {
       id: user.id,
       email: user.email,
@@ -67,11 +155,8 @@ export const authService = {
       badge_number: user.badge_number,
     };
 
-    const token = jwt.sign(payload, ENV.JWT_SECRET, {
-      expiresIn: ENV.JWT_EXPIRES_IN,
-    });
+    const token = jwt.sign(payload, ENV.JWT_SECRET, { expiresIn: ENV.JWT_EXPIRES_IN });
 
-    // Write login audit log
     await auditLogService.createLog({
       userId: user.id,
       action: AUDIT_ACTIONS.USER_LOGGED_IN,
@@ -85,19 +170,45 @@ export const authService = {
     return { token, user: profileSafe };
   },
 
-  async register(userData, creatorId = null, ipAddress = null) {
-    const { full_name, badge_number, email, password, role, phone_number } = userData;
 
-    // Check existing email or badge number
+  // Export all profiles (admin / supervisor)
+  async exportProfiles() {
+    const result = await turso.execute({ sql: 'SELECT * FROM profiles', args: [] });
+    return result.rows;
+  },
+
+  async register(userData, creatorId = null, ipAddress = null) {
+    const {
+      full_name,
+      badge_number,
+      email,
+      password,
+      role,
+      phone_number,
+    } = userData;
+
     const checkQuery = `
-      SELECT email, badge_number FROM profiles 
+      SELECT email, badge_number FROM profiles
       WHERE LOWER(email) = LOWER(?) OR UPPER(badge_number) = UPPER(?)
     `;
-    const checkResult = await turso.execute({ sql: checkQuery, args: [email, badge_number] });
+
+    const checkResult = await turso.execute({
+      sql: checkQuery,
+      args: [email, badge_number],
+    });
+
     if (checkResult.rows.length > 0) {
       const existing = checkResult.rows[0];
-      const conflictField = existing.email.toLowerCase() === email.toLowerCase() ? 'Email' : 'Badge number';
-      const error = new Error(`${conflictField} is already registered to an account.`);
+
+      const conflictField =
+        existing.email.toLowerCase() === email.toLowerCase()
+          ? 'Email'
+          : 'Badge number';
+
+      const error = new Error(
+        `${conflictField} is already registered to an account.`
+      );
+
       error.statusCode = 409;
       throw error;
     }
@@ -107,9 +218,13 @@ export const authService = {
     const id = crypto.randomUUID();
 
     const insertQuery = `
-      INSERT INTO profiles (id, full_name, badge_number, email, password_hash, role, phone_number, status)
+      INSERT INTO profiles (
+        id, full_name, badge_number, email,
+        password_hash, role, phone_number, status
+      )
       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
     `;
+
     await turso.execute({
       sql: insertQuery,
       args: [
@@ -125,13 +240,15 @@ export const authService = {
 
     const newUser = await this.getProfile(id);
 
-    // Audit log
     await auditLogService.createLog({
       userId: creatorId || id,
       action: AUDIT_ACTIONS.USER_REGISTERED,
       entityType: 'profiles',
       entityId: id,
-      details: { role: newUser.role, badge_number: newUser.badge_number },
+      details: {
+        role: newUser.role,
+        badge_number: newUser.badge_number,
+      },
       ipAddress,
     });
 
@@ -140,8 +257,13 @@ export const authService = {
 
   async getProfile(userId) {
     const result = await turso.execute({
-      sql: `SELECT id, full_name, badge_number, email, role, phone_number, status, created_at, updated_at
-            FROM profiles WHERE id = ? LIMIT 1`,
+      sql: `
+        SELECT id, full_name, badge_number, email, role,
+               phone_number, status, created_at, updated_at
+        FROM profiles
+        WHERE id = ?
+        LIMIT 1
+      `,
       args: [userId],
     });
 
@@ -154,7 +276,13 @@ export const authService = {
     return result.rows[0];
   },
 
-  async getProfiles({ role, status, search, page = 1, limit = 20 }) {
+  async getProfiles({
+    role,
+    status,
+    search,
+    page = 1,
+    limit = 20,
+  }) {
     const offset = (page - 1) * limit;
     const conditions = [];
     const args = [];
@@ -163,29 +291,48 @@ export const authService = {
       conditions.push('role = ?');
       args.push(role);
     }
+
     if (status) {
       conditions.push('status = ?');
       args.push(status);
     }
+
     if (search) {
-      conditions.push('(full_name LIKE ? OR badge_number LIKE ? OR email LIKE ?)');
+      conditions.push(
+        '(full_name LIKE ? OR badge_number LIKE ? OR email LIKE ?)'
+      );
+
       const term = `%${search}%`;
       args.push(term, term, term);
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const whereClause =
+      conditions.length > 0
+        ? `WHERE ${conditions.join(' AND ')}`
+        : '';
 
-    const countQuery = `SELECT COUNT(*) AS count FROM profiles ${whereClause}`;
-    const totalCountRes = await turso.execute({ sql: countQuery, args });
+    const countQuery = `
+      SELECT COUNT(*) AS count
+      FROM profiles
+      ${whereClause}
+    `;
+
+    const totalCountRes = await turso.execute({
+      sql: countQuery,
+      args,
+    });
+
     const total = Number(totalCountRes.rows[0].count);
 
     const selectQuery = `
-      SELECT id, full_name, badge_number, email, role, phone_number, status, created_at, updated_at
+      SELECT id, full_name, badge_number, email, role,
+             phone_number, status, created_at, updated_at
       FROM profiles
       ${whereClause}
       ORDER BY created_at DESC
       LIMIT ? OFFSET ?
     `;
+
     const result = await turso.execute({
       sql: selectQuery,
       args: [...args, limit, offset],
@@ -202,8 +349,19 @@ export const authService = {
     };
   },
 
-  async updateProfile(userId, updateData, actorId = null, ipAddress = null) {
-    const { full_name, phone_number, role, status } = updateData;
+  async updateProfile(
+    userId,
+    updateData,
+    actorId = null,
+    ipAddress = null
+  ) {
+    const {
+      full_name,
+      phone_number,
+      role,
+      status,
+    } = updateData;
+
     const updates = [];
     const args = [];
 
@@ -211,14 +369,17 @@ export const authService = {
       updates.push('full_name = ?');
       args.push(full_name);
     }
+
     if (phone_number !== undefined) {
       updates.push('phone_number = ?');
       args.push(phone_number);
     }
+
     if (role !== undefined) {
       updates.push('role = ?');
       args.push(role);
     }
+
     if (status !== undefined) {
       updates.push('status = ?');
       args.push(status);
@@ -229,12 +390,17 @@ export const authService = {
     }
 
     args.push(userId);
+
     const query = `
       UPDATE profiles
       SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `;
-    await turso.execute({ sql: query, args });
+
+    await turso.execute({
+      sql: query,
+      args,
+    });
 
     if (role !== undefined) {
       await auditLogService.createLog({
@@ -242,7 +408,12 @@ export const authService = {
         action: AUDIT_ACTIONS.ROLE_CHANGED,
         entityType: 'profiles',
         entityId: userId,
-        details: { newRole: role, full_name, phone_number, status },
+        details: {
+          newRole: role,
+          full_name,
+          phone_number,
+          status,
+        },
         ipAddress,
       });
     } else {
@@ -259,7 +430,12 @@ export const authService = {
     return this.getProfile(userId);
   },
 
-  async updateRoleAndStatus(userId, { role, status }, actorId, ipAddress = null) {
+  async updateRoleAndStatus(
+    userId,
+    { role, status },
+    actorId,
+    ipAddress = null
+  ) {
     const updates = [];
     const args = [];
 
@@ -267,25 +443,34 @@ export const authService = {
       updates.push('role = ?');
       args.push(role);
     }
+
     if (status) {
       updates.push('status = ?');
       args.push(status);
     }
 
     args.push(userId);
+
     const query = `
       UPDATE profiles
       SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `;
-    await turso.execute({ sql: query, args });
+
+    await turso.execute({
+      sql: query,
+      args,
+    });
 
     await auditLogService.createLog({
       userId: actorId,
       action: AUDIT_ACTIONS.ROLE_CHANGED,
       entityType: 'profiles',
       entityId: userId,
-      details: { newRole: role, newStatus: status },
+      details: {
+        newRole: role,
+        newStatus: status,
+      },
       ipAddress,
     });
 
@@ -293,10 +478,18 @@ export const authService = {
   },
 
   async requestPasswordChange(data) {
-    const { email, officer_name, badge_number, requested_password, reason } = data;
+    const {
+      email,
+      officer_name,
+      badge_number,
+      requested_password,
+      reason,
+    } = data;
+
     const newReq = {
       id: 'req-' + Date.now(),
-      officer_name: officer_name || email?.split('@')[0] || 'Officer',
+      officer_name:
+        officer_name || email?.split('@')[0] || 'Officer',
       badge_number: badge_number || 'N/A',
       email: (email || '').toLowerCase().trim(),
       requested_password: requested_password || 'Password123!',
@@ -310,7 +503,10 @@ export const authService = {
     try {
       await turso.execute({
         sql: `
-          INSERT INTO password_requests (id, officer_name, badge_number, email, requested_password, reason, status, requested_at)
+          INSERT INTO password_requests (
+            id, officer_name, badge_number, email,
+            requested_password, reason, status, requested_at
+          )
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `,
         args: [
@@ -325,7 +521,10 @@ export const authService = {
         ],
       });
     } catch (e) {
-      console.warn('Failed to insert password request into DB:', e.message);
+      console.warn(
+        'Failed to insert password request into DB:',
+        e.message
+      );
     }
 
     return newReq;
@@ -334,22 +533,33 @@ export const authService = {
   async getPasswordRequests() {
     try {
       const res = await turso.execute(`
-        SELECT id, officer_name, badge_number, email, requested_password, reason, status, requested_at, approved_by, approved_at, rejection_reason
+        SELECT id, officer_name, badge_number, email,
+               requested_password, reason, status,
+               requested_at, approved_by, approved_at,
+               rejection_reason
         FROM password_requests
         ORDER BY datetime(requested_at) DESC
       `);
+
       if (res.rows && res.rows.length > 0) {
         return res.rows;
       }
     } catch (e) {
-      console.warn('Failed to fetch password requests from DB:', e.message);
+      console.warn(
+        'Failed to fetch password requests from DB:',
+        e.message
+      );
     }
+
     return [];
   },
 
   async approvePasswordRequest(requestId, adminUser) {
     if (!adminUser || adminUser.role !== 'admin') {
-      const error = new Error('Access Denied: Only an Administrator can approve change of password.');
+      const error = new Error(
+        'Access Denied: Only an Administrator can approve change of password.'
+      );
+
       error.statusCode = 403;
       throw error;
     }
@@ -367,29 +577,43 @@ export const authService = {
 
     const req = res.rows[0];
     const approvedAt = new Date().toISOString();
-    const approvedBy = adminUser.full_name || 'System Administrator';
+    const approvedBy =
+      adminUser.full_name || 'System Administrator';
 
-    // 1. Update password request row in DB to permanently approved
     await turso.execute({
       sql: `
         UPDATE password_requests
-        SET status = 'approved', approved_by = ?, approved_at = ?, updated_at = CURRENT_TIMESTAMP
+        SET status = 'approved',
+            approved_by = ?,
+            approved_at = ?,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `,
       args: [approvedBy, approvedAt, requestId],
     });
 
-    // 2. Update officer password hash in profiles table
     if (req.requested_password && req.email) {
       try {
         const salt = await bcrypt.genSalt(10);
-        const hash = await bcrypt.hash(req.requested_password, salt);
+        const hash = await bcrypt.hash(
+          req.requested_password,
+          salt
+        );
+
         await turso.execute({
-          sql: 'UPDATE profiles SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE LOWER(email) = LOWER(?)',
+          sql: `
+            UPDATE profiles
+            SET password_hash = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE LOWER(email) = LOWER(?)
+          `,
           args: [hash, req.email],
         });
       } catch (e) {
-        console.warn('Could not update profile hash in DB:', e.message);
+        console.warn(
+          'Could not update profile hash in DB:',
+          e.message
+        );
       }
     }
 
@@ -401,9 +625,16 @@ export const authService = {
     };
   },
 
-  async rejectPasswordRequest(requestId, adminUser, reason = '') {
+  async rejectPasswordRequest(
+    requestId,
+    adminUser,
+    reason = ''
+  ) {
     if (!adminUser || adminUser.role !== 'admin') {
-      const error = new Error('Access Denied: Only an Administrator can reject password changes.');
+      const error = new Error(
+        'Access Denied: Only an Administrator can reject password changes.'
+      );
+
       error.statusCode = 403;
       throw error;
     }
@@ -421,17 +652,28 @@ export const authService = {
 
     const req = res.rows[0];
     const reviewedAt = new Date().toISOString();
-    const reviewedBy = adminUser.full_name || 'System Administrator';
-    const rejectionReason = reason || 'Rejected by Administrator';
+    const reviewedBy =
+      adminUser.full_name || 'System Administrator';
 
-    // Update in DB to permanently rejected
+    const rejectionReason =
+      reason || 'Rejected by Administrator';
+
     await turso.execute({
       sql: `
         UPDATE password_requests
-        SET status = 'rejected', approved_by = ?, approved_at = ?, rejection_reason = ?, updated_at = CURRENT_TIMESTAMP
+        SET status = 'rejected',
+            approved_by = ?,
+            approved_at = ?,
+            rejection_reason = ?,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `,
-      args: [reviewedBy, reviewedAt, rejectionReason, requestId],
+      args: [
+        reviewedBy,
+        reviewedAt,
+        rejectionReason,
+        requestId,
+      ],
     });
 
     return {

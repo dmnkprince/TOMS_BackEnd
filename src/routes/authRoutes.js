@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authController } from '../controllers/authController.js';
+import { exportController } from '../controllers/exportController.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/rbac.js';
 import { validate } from '../middleware/validate.js';
@@ -75,6 +76,13 @@ router.post(
   authenticate,
   authorize([ROLES.ADMIN]),
   authController.rejectPasswordRequest
+);
+
+router.get(
+  '/export/profiles',
+  authenticate,
+  authorize([ROLES.ADMIN, ROLES.SUPERVISOR]),
+  exportController.exportProfiles
 );
 
 export default router;
