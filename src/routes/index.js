@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import userRoutes from './userRoutes.js';
 import authRoutes from './authRoutes.js';
 import profileRoutes from './profileRoutes.js';
 import incidentRoutes from './incidentRoutes.js';
@@ -17,7 +18,6 @@ router.get('/health', async (req, res) => {
   } catch (err) {
     dbStatus = `unreachable (${err.message})`;
   }
-
   return res.status(200).json({
     status: 'ok',
     system: 'Traffic Offence Management System (TOMS) API',
@@ -30,6 +30,7 @@ router.get('/health', async (req, res) => {
 
 // Mount Modules
 router.use('/auth', authRoutes);
+router.use('/users', userRoutes);
 router.use('/profiles', profileRoutes);
 router.use('/incidents', incidentRoutes);
 router.use('/corrections', correctionRoutes);

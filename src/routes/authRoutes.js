@@ -18,13 +18,36 @@ router.get('/me', authenticate, authController.getMe);
 // Authenticated: Logout session
 router.post('/logout', authenticate, authController.logout);
 
-// Admin Only: Provision staff user
+// Admin and Supervisor: Provision staff user
 router.post(
   '/register-staff',
   authenticate,
-  authorize([ROLES.ADMIN]),
+  authorize([ROLES.ADMIN, ROLES.SUPERVISOR]),
   validate(registerUserSchema),
   authController.registerStaff
+);
+
+// Get list of users (admin / supervisor)
+router.get(
+  '/users',
+  authenticate,
+  authorize([ROLES.ADMIN, ROLES.SUPERVISOR]),
+  authController.getUsers
+);
+
+// Update a user (admin / supervisor)
+router.put(
+  '/users/:id',
+  authenticate,
+  authorize([ROLES.ADMIN, ROLES.SUPERVISOR]),
+  authController.updateUser
+);
+
+router.delete(
+  '/users/:id',
+  authenticate,
+  authorize([ROLES.ADMIN, ROLES.SUPERVISOR]),
+  authController.deleteUser
 );
 
 // Submit Password Change Request (Public or Authenticated)

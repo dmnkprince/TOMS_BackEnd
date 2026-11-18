@@ -1,4 +1,5 @@
-import { incidentService } from '../services/incidentService.js';
+import { ROLES } from '../constants/roles.js';
+
 import { sendResponse } from '../utils/apiResponse.js';
 import { STATUS_CODES } from '../constants/statusCodes.js';
 
@@ -54,6 +55,11 @@ export const incidentController = {
     try {
       const { id } = req.params;
       const incident = await incidentService.getIncidentById(id);
+
+      // Role‑based visibility: agents can only see their own incidents; field agents and supervisors/admins can see all
+      if (req.user && req.user.role === ROLES.AGENT && incident.agent_id !== req.user.id) {
+        return sendResponse(res, STATUS_CODES.FORBIDDEN, 'Access denied: agents may only view their own incidents.', null);
+      }
 
       return sendResponse(res, STATUS_CODES.OK, 'Incident details retrieved.', incident);
     } catch (error) {

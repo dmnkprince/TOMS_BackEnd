@@ -12,6 +12,7 @@ const router = Router();
 router.post(
   '/',
   authenticate,
+  // Agents, Supervisors, Admins can create incidents; field agents are view‑only
   authorize([ROLES.AGENT, ROLES.SUPERVISOR, ROLES.ADMIN]),
   validate(registerIncidentSchema),
   incidentController.registerIncident

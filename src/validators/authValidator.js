@@ -11,7 +11,7 @@ export const registerUserSchema = z.object({
   badge_number: z.string().min(2, 'Badge number must be provided'),
   email: z.string().email('Valid email is required'),
   password: z.string().min(6, 'Password must be at least 6 characters'),
-  role: z.enum(['agent', 'supervisor', 'admin'], {
+  role: z.enum(['agent', 'supervisor', 'admin', 'field_agent'], {
     errorMap: () => ({ message: `Role must be one of: ${ALL_ROLES.join(', ')}` }),
   }),
   phone_number: z.string().optional(),
@@ -23,6 +23,6 @@ export const updateProfileSchema = z.object({
 });
 
 export const updateRoleSchema = z.object({
-  role: z.enum(['agent', 'supervisor', 'admin']),
+  role: z.enum(['agent', 'supervisor', 'admin', 'field_agent']),
   status: z.enum(['active', 'suspended', 'inactive']).optional(),
 });

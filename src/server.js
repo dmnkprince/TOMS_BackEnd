@@ -2,6 +2,7 @@ import app from './app.js';
 import { ENV } from './config/env.js';
 import { turso } from './config/db.js';
 import { logger } from './utils/logger.js';
+import { initPasswordRequestsTable } from './db/initPasswordRequests.js';
 
 const PORT = ENV.PORT || 5000;
 
@@ -13,10 +14,11 @@ const server = app.listen(PORT, async () => {
   logger.info(`🏥 Health Check: http://localhost:${PORT}/api/v1/health`);
   logger.info(`=======================================================`);
 
-  // Verify Turso Connectivity
+  // Verify Turso Connectivity & Ensure Tables
   try {
     const res = await turso.execute("SELECT datetime('now') AS now");
     logger.info(`✅ Turso Database Connected: ${res.rows[0].now}`);
+    await initPasswordRequestsTable();
   } catch (err) {
     logger.warn(`⚠️ Turso connection warning: ${err.message}`);
   }

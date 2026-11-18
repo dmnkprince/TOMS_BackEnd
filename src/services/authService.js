@@ -7,6 +7,28 @@ import { AUDIT_ACTIONS } from '../constants/auditActions.js';
 import { auditLogService } from './auditLogService.js';
 
 export const authService = {
+  // Existing methods ...
+  // Delete a user (admin / supervisor)
+  async deleteUser(userId, actorId, ipAddress = null) {
+    // Ensure user exists
+    const profile = await this.getProfile(userId);
+    // Delete user
+    await turso.execute({
+      sql: 'DELETE FROM profiles WHERE id = ?',
+      args: [userId],
+    });
+    // Audit log
+    await auditLogService.createLog({
+      userId: actorId,
+      action: AUDIT_ACTIONS.USER_DELETED,
+      entityType: 'profiles',
+      entityId: userId,
+      details: { deletedUserId: userId, role: profile.role },
+      ipAddress,
+    });
+    return true;
+  },
+
   async login(email, password, ipAddress = null) {
     const query = `
       SELECT id, full_name, badge_number, email, password_hash, role, phone_number, status
@@ -181,7 +203,7 @@ export const authService = {
   },
 
   async updateProfile(userId, updateData, actorId = null, ipAddress = null) {
-    const { full_name, phone_number } = updateData;
+    const { full_name, phone_number, role, status } = updateData;
     const updates = [];
     const args = [];
 
@@ -192,6 +214,14 @@ export const authService = {
     if (phone_number !== undefined) {
       updates.push('phone_number = ?');
       args.push(phone_number);
+    }
+    if (role !== undefined) {
+      updates.push('role = ?');
+      args.push(role);
+    }
+    if (status !== undefined) {
+      updates.push('status = ?');
+      args.push(status);
     }
 
     if (updates.length === 0) {
@@ -206,14 +236,25 @@ export const authService = {
     `;
     await turso.execute({ sql: query, args });
 
-    await auditLogService.createLog({
-      userId: actorId || userId,
-      action: AUDIT_ACTIONS.PROFILE_UPDATED,
-      entityType: 'profiles',
-      entityId: userId,
-      details: updateData,
-      ipAddress,
-    });
+    if (role !== undefined) {
+      await auditLogService.createLog({
+        userId: actorId || userId,
+        action: AUDIT_ACTIONS.ROLE_CHANGED,
+        entityType: 'profiles',
+        entityId: userId,
+        details: { newRole: role, full_name, phone_number, status },
+        ipAddress,
+      });
+    } else {
+      await auditLogService.createLog({
+        userId: actorId || userId,
+        action: AUDIT_ACTIONS.PROFILE_UPDATED,
+        entityType: 'profiles',
+        entityId: userId,
+        details: updateData,
+        ipAddress,
+      });
+    }
 
     return this.getProfile(userId);
   },
@@ -251,33 +292,6 @@ export const authService = {
     return this.getProfile(userId);
   },
 
-  passwordRequests: [
-    {
-      id: 'req-001',
-      officer_name: 'Officer David Okafor',
-      badge_number: 'AGT-101',
-      email: 'officer.david@toms.gov',
-      requested_password: 'Password2026!',
-      reason: 'Periodic mandatory credentials change',
-      status: 'pending',
-      requested_at: new Date(Date.now() - 3600 * 1000 * 4).toISOString(),
-      approved_by: null,
-      approved_at: null,
-    },
-    {
-      id: 'req-002',
-      officer_name: 'Officer Aisha Bello',
-      badge_number: 'AGT-102',
-      email: 'officer.aisha@toms.gov',
-      requested_password: 'SecurePass2026!',
-      reason: 'Password reset request after device re-assignment',
-      status: 'pending',
-      requested_at: new Date(Date.now() - 3600 * 1000 * 18).toISOString(),
-      approved_by: null,
-      approved_at: null,
-    },
-  ],
-
   async requestPasswordChange(data) {
     const { email, officer_name, badge_number, requested_password, reason } = data;
     const newReq = {
@@ -292,12 +306,45 @@ export const authService = {
       approved_by: null,
       approved_at: null,
     };
-    this.passwordRequests.unshift(newReq);
+
+    try {
+      await turso.execute({
+        sql: `
+          INSERT INTO password_requests (id, officer_name, badge_number, email, requested_password, reason, status, requested_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        args: [
+          newReq.id,
+          newReq.officer_name,
+          newReq.badge_number,
+          newReq.email,
+          newReq.requested_password,
+          newReq.reason,
+          newReq.status,
+          newReq.requested_at,
+        ],
+      });
+    } catch (e) {
+      console.warn('Failed to insert password request into DB:', e.message);
+    }
+
     return newReq;
   },
 
   async getPasswordRequests() {
-    return this.passwordRequests;
+    try {
+      const res = await turso.execute(`
+        SELECT id, officer_name, badge_number, email, requested_password, reason, status, requested_at, approved_by, approved_at, rejection_reason
+        FROM password_requests
+        ORDER BY datetime(requested_at) DESC
+      `);
+      if (res.rows && res.rows.length > 0) {
+        return res.rows;
+      }
+    } catch (e) {
+      console.warn('Failed to fetch password requests from DB:', e.message);
+    }
+    return [];
   },
 
   async approvePasswordRequest(requestId, adminUser) {
@@ -306,17 +353,33 @@ export const authService = {
       error.statusCode = 403;
       throw error;
     }
-    const req = this.passwordRequests.find((r) => r.id === requestId);
-    if (!req) {
+
+    const res = await turso.execute({
+      sql: 'SELECT * FROM password_requests WHERE id = ? LIMIT 1',
+      args: [requestId],
+    });
+
+    if (res.rows.length === 0) {
       const error = new Error('Password request not found.');
       error.statusCode = 404;
       throw error;
     }
 
-    req.status = 'approved';
-    req.approved_by = adminUser.full_name || 'System Administrator';
-    req.approved_at = new Date().toISOString();
+    const req = res.rows[0];
+    const approvedAt = new Date().toISOString();
+    const approvedBy = adminUser.full_name || 'System Administrator';
 
+    // 1. Update password request row in DB to permanently approved
+    await turso.execute({
+      sql: `
+        UPDATE password_requests
+        SET status = 'approved', approved_by = ?, approved_at = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+      args: [approvedBy, approvedAt, requestId],
+    });
+
+    // 2. Update officer password hash in profiles table
     if (req.requested_password && req.email) {
       try {
         const salt = await bcrypt.genSalt(10);
@@ -330,7 +393,12 @@ export const authService = {
       }
     }
 
-    return req;
+    return {
+      ...req,
+      status: 'approved',
+      approved_by: approvedBy,
+      approved_at: approvedAt,
+    };
   },
 
   async rejectPasswordRequest(requestId, adminUser, reason = '') {
@@ -339,17 +407,39 @@ export const authService = {
       error.statusCode = 403;
       throw error;
     }
-    const req = this.passwordRequests.find((r) => r.id === requestId);
-    if (!req) {
+
+    const res = await turso.execute({
+      sql: 'SELECT * FROM password_requests WHERE id = ? LIMIT 1',
+      args: [requestId],
+    });
+
+    if (res.rows.length === 0) {
       const error = new Error('Password request not found.');
       error.statusCode = 404;
       throw error;
     }
 
-    req.status = 'rejected';
-    req.rejection_reason = reason || 'Rejected by Administrator';
-    req.reviewed_by = adminUser.full_name || 'System Administrator';
-    req.reviewed_at = new Date().toISOString();
-    return req;
+    const req = res.rows[0];
+    const reviewedAt = new Date().toISOString();
+    const reviewedBy = adminUser.full_name || 'System Administrator';
+    const rejectionReason = reason || 'Rejected by Administrator';
+
+    // Update in DB to permanently rejected
+    await turso.execute({
+      sql: `
+        UPDATE password_requests
+        SET status = 'rejected', approved_by = ?, approved_at = ?, rejection_reason = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `,
+      args: [reviewedBy, reviewedAt, rejectionReason, requestId],
+    });
+
+    return {
+      ...req,
+      status: 'rejected',
+      approved_by: reviewedBy,
+      approved_at: reviewedAt,
+      rejection_reason: rejectionReason,
+    };
   },
 };
