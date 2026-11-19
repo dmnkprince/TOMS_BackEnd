@@ -1,5 +1,5 @@
 // src/controllers/pushController.js
-import webpush from 'web-push';
+import * as webpush from 'web-push';
 import { db } from '../config/db.js';
 import { ENV } from '../config/env.js';
 import { sendResponse, sendError } from '../utils/apiResponse.js';
