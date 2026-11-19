@@ -17,18 +17,8 @@ The database strictly implements the approved **7-table architecture**:
 
 ---
 
-## 2. Default Seed Accounts
 
 All default accounts have password: **`Password123!`**
-
-| Role | Name | Email | Badge Number |
-| :--- | :--- | :--- | :--- |
-| **Admin** | Commander Sarah Jenkins | `admin@toms.gov` | `ADMIN-001` |
-| **Supervisor** | Supervisor Marcus Adebayo | `supervisor@toms.gov` | `SUP-002` |
-| **Agent** | Officer David Okafor | `officer.david@toms.gov` | `AGT-101` |
-| **Agent** | Officer Aisha Bello | `officer.aisha@toms.gov` | `AGT-102` |
-
----
 
 ## 3. Getting Started
 
