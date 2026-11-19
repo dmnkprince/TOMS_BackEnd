@@ -44,6 +44,7 @@ router.put(
   authController.updateUser
 );
 
+// Delete a user (admin / supervisor)
 router.delete(
   '/users/:id',
   authenticate,
@@ -78,11 +79,12 @@ router.post(
   authController.rejectPasswordRequest
 );
 
+// Admin & Supervisor: Export incident reports as Excel
 router.get(
-  '/export/profiles',
+  '/export/incidents',
   authenticate,
   authorize([ROLES.ADMIN, ROLES.SUPERVISOR]),
-  exportController.exportProfiles
+  exportController.exportIncidents
 );
 
 export default router;
