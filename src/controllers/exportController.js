@@ -13,6 +13,24 @@ export const exportController = {
         throw err;
       }
 
+      const { startDate, endDate, start_date, end_date } = req.query;
+      const fromDate = (startDate || start_date || '').trim();
+      const toDate = (endDate || end_date || '').trim();
+
+      const conditions = [];
+      const args = [];
+
+      if (fromDate) {
+        conditions.push('DATE(i.incident_date) >= DATE(?)');
+        args.push(fromDate);
+      }
+      if (toDate) {
+        conditions.push('DATE(i.incident_date) <= DATE(?)');
+        args.push(toDate);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
       // Query incidents from Turso (SQLite) with offence info
       const result = await turso.execute({
         sql: `
@@ -31,10 +49,11 @@ export const exportController = {
           FROM incidents i
           LEFT JOIN incident_offences io ON i.id = io.incident_id
           LEFT JOIN offence_types ot ON io.offence_type_id = ot.id
+          ${whereClause}
           GROUP BY i.id
           ORDER BY i.incident_date DESC
         `,
-        args: [],
+        args,
       });
 
       const incidents = result.rows;
@@ -101,12 +120,21 @@ export const exportController = {
       // Write workbook to buffer
       const buffer = await workbook.xlsx.writeBuffer();
 
+      let filename = 'incident_reports.xlsx';
+      if (fromDate && toDate) {
+        filename = `incident_reports_${fromDate}_to_${toDate}.xlsx`;
+      } else if (fromDate) {
+        filename = `incident_reports_from_${fromDate}.xlsx`;
+      } else if (toDate) {
+        filename = `incident_reports_to_${toDate}.xlsx`;
+      }
+
       // Set headers for file download
       res.setHeader(
         'Content-Type',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       );
-      res.setHeader('Content-Disposition', 'attachment; filename="incident_reports.xlsx"');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.send(Buffer.from(buffer));
     } catch (error) {
       next(error);
