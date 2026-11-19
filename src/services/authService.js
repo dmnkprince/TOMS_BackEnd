@@ -486,13 +486,19 @@ export const authService = {
       reason,
     } = data;
 
+    if (!requested_password || requested_password.trim().length < 6) {
+      const err = new Error('A valid requested password (at least 6 characters) is required.');
+      err.statusCode = 400;
+      throw err;
+    }
+
     const newReq = {
       id: 'req-' + Date.now(),
       officer_name:
         officer_name || email?.split('@')[0] || 'Officer',
       badge_number: badge_number || 'N/A',
       email: (email || '').toLowerCase().trim(),
-      requested_password: requested_password || 'Password123!',
+      requested_password: requested_password.trim(),
       reason: reason || 'Credentials update',
       status: 'pending',
       requested_at: new Date().toISOString(),

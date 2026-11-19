@@ -13,10 +13,16 @@ async function runTests() {
   try {
     // 1. Test Login with Admin and Agent
     console.log('1️⃣ Testing Authentication...');
-    const adminLogin = await authService.login('admin@toms.gov', 'Password123!');
+    const testPassword = process.env.TEST_PASSWORD || process.env.SEED_PASSWORD;
+    if (!testPassword) {
+      throw new Error(
+        'Missing TEST_PASSWORD in environment. Please set TEST_PASSWORD in your .env to run integration tests.'
+      );
+    }
+    const adminLogin = await authService.login('admin@toms.gov', testPassword);
     console.log(`   ✅ Admin authenticated: ${adminLogin.user.full_name} (${adminLogin.user.role})`);
 
-    const agentLogin = await authService.login('officer.david@toms.gov', 'Password123!');
+    const agentLogin = await authService.login('officer.david@toms.gov', testPassword);
     console.log(`   ✅ Agent authenticated: ${agentLogin.user.full_name} (${agentLogin.user.role})`);
 
     // 2. Fetch Offence Types and Locations
