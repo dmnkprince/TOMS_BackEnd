@@ -23,6 +23,7 @@ dist-ssr
 *.suo
 *.antigravityrules
 *.sql
+*.md
 *.ntvs*
 *.njsproj
 *.sln

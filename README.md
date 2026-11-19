@@ -19,7 +19,6 @@ The database strictly implements the approved **7-table architecture**:
 
 ## 2. Default Seed Accounts
 
-All default accounts have password: **`Password123!`**
 
 | Role | Name | Email | Badge Number |
 | :--- | :--- | :--- | :--- |
