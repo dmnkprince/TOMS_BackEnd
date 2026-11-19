@@ -3,6 +3,7 @@ import { ENV } from './config/env.js';
 import { turso } from './config/db.js';
 import { logger } from './utils/logger.js';
 import { initPasswordRequestsTable } from './db/initPasswordRequests.js';
+import { initPushTable } from './controllers/pushController.js';
 
 const PORT = ENV.PORT || 5000;
 
@@ -19,6 +20,8 @@ const server = app.listen(PORT, async () => {
     const res = await turso.execute("SELECT datetime('now') AS now");
     logger.info(`✅ Turso Database Connected: ${res.rows[0].now}`);
     await initPasswordRequestsTable();
+    await initPushTable();
+    logger.info('✅ Push subscriptions table ready');
   } catch (err) {
     logger.warn(`⚠️ Turso connection warning: ${err.message}`);
   }

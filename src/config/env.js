@@ -9,4 +9,7 @@ export const ENV = {
   JWT_SECRET: process.env.JWT_SECRET || 'toms_default_jwt_secret_dev_only',
   JWT_EXPIRES_IN: process.env.JWT_EXPIRES_IN || '24h',
   CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
+  VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY || '',
+  VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY || '',
+  VAPID_EMAIL: process.env.VAPID_EMAIL || 'mailto:admin@toms.gov.ng',
 };

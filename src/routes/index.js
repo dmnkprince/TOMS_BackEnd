@@ -6,6 +6,7 @@ import incidentRoutes from './incidentRoutes.js';
 import correctionRoutes from './correctionRoutes.js';
 import locationRoutes from './locationRoutes.js';
 import reportRoutes from './reportRoutes.js';
+import pushRoutes from './pushRoutes.js';
 import { turso } from '../config/db.js';
 
 const router = Router();
@@ -36,5 +37,6 @@ router.use('/incidents', incidentRoutes);
 router.use('/corrections', correctionRoutes);
 router.use('/locations', locationRoutes);
 router.use('/reports', reportRoutes);
+router.use('/push', pushRoutes);
 
 export default router;
