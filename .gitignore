@@ -30,3 +30,8 @@ dist-ssr
 *.sw?
 # Data / CSV files
 *.csv
+
+# Tests
+src/tests/
+scripts/test-api.js
+

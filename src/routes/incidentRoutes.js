@@ -3,17 +3,20 @@ import { incidentController } from '../controllers/incidentController.js';
 import { authenticate } from '../middleware/auth.js';
 import { authorize } from '../middleware/rbac.js';
 import { validate } from '../middleware/validate.js';
-import { registerIncidentSchema, incidentSearchQuerySchema } from '../validators/incidentValidator.js';
+import {
+  registerIncidentSchema,
+  incidentSearchQuerySchema,
+  updateIncidentSchema,
+} from '../validators/incidentValidator.js';
 import { ROLES } from '../constants/roles.js';
 
 const router = Router();
 
-// Agents, Supervisors, Admins: Register new incident (atomically records offences)
+// Agents, Field Agents, Supervisors, Admins: Register new incident (atomically records offences)
 router.post(
   '/',
   authenticate,
-  // Agents, Supervisors, Admins can create incidents; field agents are view‑only
-  authorize([ROLES.AGENT, ROLES.SUPERVISOR, ROLES.ADMIN]),
+  authorize([ROLES.AGENT, ROLES.FIELD_AGENT, ROLES.SUPERVISOR, ROLES.ADMIN]),
   validate(registerIncidentSchema),
   incidentController.registerIncident
 );
@@ -31,5 +34,30 @@ router.get('/ref/:referenceNumber', authenticate, incidentController.getIncident
 
 // Authenticated: Retrieve by ID
 router.get('/:id', authenticate, incidentController.getIncidentById);
+
+// Supervisors and Admins Only: Update / Edit Incident Record
+router.put(
+  '/:id',
+  authenticate,
+  authorize([ROLES.SUPERVISOR, ROLES.ADMIN]),
+  validate(updateIncidentSchema),
+  incidentController.updateIncident
+);
+
+router.patch(
+  '/:id',
+  authenticate,
+  authorize([ROLES.SUPERVISOR, ROLES.ADMIN]),
+  validate(updateIncidentSchema),
+  incidentController.updateIncident
+);
+
+// Supervisors and Admins Only: Delete Incident Record
+router.delete(
+  '/:id',
+  authenticate,
+  authorize([ROLES.SUPERVISOR, ROLES.ADMIN]),
+  incidentController.deleteIncident
+);
 
 export default router;

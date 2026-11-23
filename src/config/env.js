@@ -12,4 +12,6 @@ export const ENV = {
   VAPID_PUBLIC_KEY: process.env.VAPID_PUBLIC_KEY || '',
   VAPID_PRIVATE_KEY: process.env.VAPID_PRIVATE_KEY || '',
   VAPID_EMAIL: process.env.VAPID_EMAIL || 'mailto:admin@toms.gov.ng',
+  REDIS_URL: process.env.REDIS_URL || null,
+  TRUST_PROXY: process.env.TRUST_PROXY || '1',
 };

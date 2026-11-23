@@ -5,6 +5,7 @@ import { turso } from '../config/db.js';
 import { ENV } from '../config/env.js';
 import { AUDIT_ACTIONS } from '../constants/auditActions.js';
 import { auditLogService } from './auditLogService.js';
+import { cacheService } from '../utils/cacheService.js';
 
 export const authService = {
   // Delete a user (admin / supervisor)
@@ -15,6 +16,12 @@ export const authService = {
       sql: 'DELETE FROM profiles WHERE id = ?',
       args: [userId],
     });
+
+    // Invalidate user session cache
+    await cacheService.del(`session:user:${userId}`);
+    if (profile?.email) {
+      await cacheService.del(`session:user:${profile.email}`);
+    }
 
     await auditLogService.createLog({
       userId: actorId,
@@ -402,6 +409,9 @@ export const authService = {
       args,
     });
 
+    // Invalidate cached user session
+    await cacheService.del(`session:user:${userId}`);
+
     if (role !== undefined) {
       await auditLogService.createLog({
         userId: actorId || userId,
@@ -461,6 +471,9 @@ export const authService = {
       sql: query,
       args,
     });
+
+    // Invalidate cached user session
+    await cacheService.del(`session:user:${userId}`);
 
     await auditLogService.createLog({
       userId: actorId,

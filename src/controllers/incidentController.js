@@ -34,13 +34,6 @@ export const incidentController = {
     try {
       const queryParams = { ...req.query };
 
-      // Role-based visibility enforcement:
-      // Agents can ONLY view incidents they registered.
-      // Admins and supervisors can view incidents recorded by everyone.
-      if (req.user && req.user.role === 'agent') {
-        queryParams.agent_id = req.user.id;
-      }
-
       const result = await incidentService.searchIncidents(queryParams);
 
       return sendResponse(res, STATUS_CODES.OK, 'Incidents retrieved successfully.', result);
@@ -57,11 +50,6 @@ export const incidentController = {
       const { id } = req.params;
       const incident = await incidentService.getIncidentById(id);
 
-      // Role‑based visibility: agents can only see their own incidents; field agents and supervisors/admins can see all
-      if (req.user && req.user.role === ROLES.AGENT && incident.agent_id !== req.user.id) {
-        return sendResponse(res, STATUS_CODES.FORBIDDEN, 'Access denied: agents may only view their own incidents.', null);
-      }
-
       return sendResponse(res, STATUS_CODES.OK, 'Incident details retrieved.', incident);
     } catch (error) {
       next(error);
@@ -77,6 +65,50 @@ export const incidentController = {
       const incident = await incidentService.getIncidentByReference(referenceNumber);
 
       return sendResponse(res, STATUS_CODES.OK, 'Incident details retrieved.', incident);
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * Updates an existing incident record (Supervisors and Admins only).
+   */
+  async updateIncident(req, res, next) {
+    try {
+      const { id } = req.params;
+      const ipAddress = req.ip || req.headers['x-forwarded-for'];
+      const userId = req.user.id;
+
+      const updatedIncident = await incidentService.updateIncident(id, req.body, userId, ipAddress);
+
+      return sendResponse(
+        res,
+        STATUS_CODES.OK,
+        `Incident ${updatedIncident.reference_number || id} updated successfully.`,
+        updatedIncident
+      );
+    } catch (error) {
+      next(error);
+    }
+  },
+
+  /**
+   * Deletes an existing incident record (Supervisors and Admins only).
+   */
+  async deleteIncident(req, res, next) {
+    try {
+      const { id } = req.params;
+      const ipAddress = req.ip || req.headers['x-forwarded-for'];
+      const userId = req.user.id;
+
+      const result = await incidentService.deleteIncident(id, userId, ipAddress);
+
+      return sendResponse(
+        res,
+        STATUS_CODES.OK,
+        `Incident ${result.reference_number || id} deleted successfully.`,
+        result
+      );
     } catch (error) {
       next(error);
     }

@@ -15,6 +15,11 @@ import authRoutes from './routes/authRoutes.js';
 
 const app = express();
 
+// Enable reverse-proxy trust for accurate IP resolution behind Render / Cloudflare / Load Balancers
+if (ENV.TRUST_PROXY) {
+  app.set('trust proxy', Number(ENV.TRUST_PROXY) || 1);
+}
+
 // Disable x-powered-by header (defense-in-depth)
 app.disable('x-powered-by');
 

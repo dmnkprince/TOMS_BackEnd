@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { ENV } from '../config/env.js';
 import { turso } from '../config/db.js';
 import { STATUS_CODES } from '../constants/statusCodes.js';
+import { cacheService } from '../utils/cacheService.js';
 
 export const authenticate = async (req, res, next) => {
   try {
@@ -26,23 +27,30 @@ export const authenticate = async (req, res, next) => {
       });
     }
 
-    // Fetch current profile from Turso database
-    const profileResult = await turso.execute({
-      sql: `SELECT id, full_name, badge_number, email, role, phone_number, status 
-            FROM profiles 
-            WHERE id = ? OR email = ? 
-            LIMIT 1`,
-      args: [decoded.id, decoded.email],
-    });
+    const cacheKey = `session:user:${decoded.id || decoded.email}`;
+    let profile = await cacheService.get(cacheKey);
 
-    if (profileResult.rows.length === 0) {
-      return res.status(STATUS_CODES.UNAUTHORIZED).json({
-        success: false,
-        message: 'User profile not found for this authenticated account.',
+    if (!profile) {
+      // Cache Miss: Query Turso database
+      const profileResult = await turso.execute({
+        sql: `SELECT id, full_name, badge_number, email, role, phone_number, status 
+              FROM profiles 
+              WHERE id = ? OR email = ? 
+              LIMIT 1`,
+        args: [decoded.id, decoded.email],
       });
-    }
 
-    const profile = profileResult.rows[0];
+      if (profileResult.rows.length === 0) {
+        return res.status(STATUS_CODES.UNAUTHORIZED).json({
+          success: false,
+          message: 'User profile not found for this authenticated account.',
+        });
+      }
+
+      profile = profileResult.rows[0];
+      // Store in L1/L2 cache for 10 minutes (600s)
+      await cacheService.set(cacheKey, profile, 600);
+    }
 
     // Ensure account is active
     if (profile.status !== 'active') {

@@ -8,11 +8,11 @@ import { ROLES } from '../constants/roles.js';
 
 const router = Router();
 
-// Agents, Supervisors, Admins: Submit a correction request
+// Agents, Field Agents, Supervisors, Admins: Submit a correction request
 router.post(
   '/',
   authenticate,
-  authorize([ROLES.AGENT, ROLES.SUPERVISOR, ROLES.ADMIN]),
+  authorize([ROLES.AGENT, ROLES.FIELD_AGENT, ROLES.SUPERVISOR, ROLES.ADMIN]),
   validate(createCorrectionSchema),
   correctionController.submitRequest
 );

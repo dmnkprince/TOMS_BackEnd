@@ -43,6 +43,7 @@ export const exportController = {
             i.vehicle_color,
             i.incident_date,
             i.manual_location,
+            i.video_file_name,
             i.remarks,
             GROUP_CONCAT(ot.title, ', ') AS offence_titles,
             GROUP_CONCAT(io.notes, ', ') AS offence_notes
@@ -73,6 +74,7 @@ export const exportController = {
         { header: 'Date', key: 'date', width: 15 },
         { header: 'Offence Type', key: 'offenceType', width: 25 },
         { header: 'Location', key: 'location', width: 25 },
+        { header: 'Video File Name', key: 'videoFileName', width: 25 },
         { header: 'Description / Notes', key: 'description', width: 35 },
       ];
 
@@ -113,6 +115,7 @@ export const exportController = {
           date: dateStr,
           offenceType: inc.offence_titles || inc.offence_notes || '',
           location: inc.manual_location || '',
+          videoFileName: inc.video_file_name || '',
           description: inc.remarks || '',
         });
       });

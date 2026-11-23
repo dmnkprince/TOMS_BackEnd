@@ -6,17 +6,23 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
+    "start:cluster": "node src/cluster.js",
+    "start:pm2": "pm2 start ecosystem.config.cjs",
     "dev": "nodemon src/server.js",
     "migrate": "node scripts/turso-migrate.js",
-    "test": "node scripts/test-api.js"
+    "test": "node scripts/test-api.js",
+    "test:unit": "node --test src/tests/referenceGenerator.test.js src/tests/apiResponse.test.js src/tests/rbac.test.js src/tests/validators.test.js src/tests/cacheService.test.js",
+    "test:perf": "node --test src/tests/performance.test.js",
+    "test:all": "node --test src/tests/referenceGenerator.test.js src/tests/apiResponse.test.js src/tests/rbac.test.js src/tests/validators.test.js src/tests/cacheService.test.js src/tests/performance.test.js"
   },
   "keywords": [
     "toms",
     "traffic",
     "offence-management",
     "express",
-    "supabase",
-    "postgresql",
+    "turso",
+    "libsql",
+    "sqlite",
     "rest-api"
   ],
   "author": "TOMS Engineering Team",
